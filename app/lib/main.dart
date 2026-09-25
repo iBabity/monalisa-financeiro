@@ -1823,18 +1823,6 @@ class _WorkspaceState extends State<Workspace> {
             .toList()
           ..sort((a, b) => (a['due'] as String).compareTo(b['due'] as String));
     return [
-      SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: SegmentedButton<String>(
-          segments: availableMonths
-              .map((m) => ButtonSegment(value: m, label: Text(monthLabel(m))))
-              .toList(),
-          selected: {selectedMonth},
-          onSelectionChanged: (value) =>
-              setState(() => selectedMonth = value.first),
-        ),
-      ),
-      const SizedBox(height: 16),
       Row(
         children: [
           Expanded(
@@ -1899,6 +1887,18 @@ class _WorkspaceState extends State<Workspace> {
         action: Text(
           'Em aberto: ${money(total(list.where((e) => e['cancelled'] == 0), 'remaining'))}',
           style: const TextStyle(fontWeight: FontWeight.w600, color: teal),
+        ),
+      ),
+      const SizedBox(height: 16),
+      SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: SegmentedButton<String>(
+          segments: availableMonths
+              .map((m) => ButtonSegment(value: m, label: Text(monthLabel(m))))
+              .toList(),
+          selected: {selectedMonth},
+          onSelectionChanged: (value) =>
+              setState(() => selectedMonth = value.first),
         ),
       ),
     ];
