@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Monalisa • Painel Central</title><link rel="stylesheet" href="styles.css"></head>
+<body><main>
+  <section id="login" class="card login"><div class="brand">monalisa <small>LICENÇAS</small></div><h1>PAINEL CENTRAL</h1><p>CONTROLE REMOTO DAS INSTALAÇÕES</p><input id="user" value="ADMIN" aria-label="Usuário"><input id="pin" type="password" inputmode="numeric" maxlength="10" placeholder="SENHA MESTRA DO DIA" aria-label="Senha"><button onclick="login()">ENTRAR</button><div id="loginError" class="error"></div></section>
+  <section id="panel" hidden><header><div class="brand">monalisa <small>PAINEL CENTRAL</small></div><button class="secondary" onclick="logout()">SAIR</button></header>
+    <div class="toolbar"><div><h1>EMPRESAS E LICENÇAS</h1><p>LIBERE, AVISE, LIMITE OU BLOQUEIE UMA INSTALAÇÃO.</p></div><button onclick="openCreate()">+ NOVA LICENÇA</button></div>
+    <div class="legend"><span class="active">● ATIVA</span><span class="warning">● AVISO</span><span class="read_only">● SOMENTE CONSULTA</span><span class="blocked">● BLOQUEADA</span></div>
+    <div id="licenses" class="grid"></div>
+  </section>
+</main>
+<dialog id="create"><form method="dialog" onsubmit="createLicense(event)"><h2>NOVA LICENÇA</h2><label>EMPRESA<input id="company" required></label><label>CNPJ<input id="cnpj" required maxlength="18"></label><label>OBSERVAÇÃO<input id="notes"></label><div class="actions"><button type="button" class="secondary" onclick="create.close()">CANCELAR</button><button>SALVAR</button></div><div id="createError" class="error"></div></form></dialog>
+<dialog id="keyDialog"><h2>CHAVE CRIADA</h2><p>ENVIE ESTA CHAVE SOMENTE AO CLIENTE CORRETO. ELA SERÁ MOSTRADA UMA ÚNICA VEZ.</p><code id="createdKey"></code><div class="actions"><button onclick="keyDialog.close()">FECHAR</button></div></dialog>
+<script src="app.js"></script></body></html>

@@ -6,6 +6,7 @@ New-Item -ItemType Directory -Force $testDir | Out-Null
 $env:FINANCE_DB = Join-Path $testDir 'test.db'
 $env:FINANCE_URL = 'http://127.0.0.1:5199'
 $env:FINANCE_AUTH_DISABLED = '1'
+$env:MONALISA_LICENSE_DISABLED = '1'
 $process = Start-Process -FilePath 'C:\Tools\dotnet\dotnet.exe' -ArgumentList @($ApiDll) -WorkingDirectory (Join-Path $root 'api') -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $testDir 'api.log') -RedirectStandardError (Join-Path $testDir 'error.log')
 function Request($path, $body = $null) {
     if ($null -eq $body) { return Invoke-RestMethod ('http://127.0.0.1:5199/api' + $path) }
@@ -90,4 +91,4 @@ try {
     $after=Request '/companies/1/state'
     Check ($after.titles.Count -eq $before.titles.Count -and ($after.accounts.balance | Measure-Object -Sum).Sum -eq ($before.accounts.balance | Measure-Object -Sum).Sum) 'Backup reaberto preserva títulos e saldos'
     Write-Output 'TODOS OS TESTES DE API PASSARAM'
-} finally { if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id }; Remove-Item Env:\FINANCE_DB -ErrorAction SilentlyContinue; Remove-Item Env:\FINANCE_URL -ErrorAction SilentlyContinue; Remove-Item Env:\FINANCE_AUTH_DISABLED -ErrorAction SilentlyContinue }
+} finally { if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id }; Remove-Item Env:\FINANCE_DB -ErrorAction SilentlyContinue; Remove-Item Env:\FINANCE_URL -ErrorAction SilentlyContinue; Remove-Item Env:\FINANCE_AUTH_DISABLED -ErrorAction SilentlyContinue; Remove-Item Env:\MONALISA_LICENSE_DISABLED -ErrorAction SilentlyContinue }

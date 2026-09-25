@@ -11,6 +11,7 @@ typedef WorkspaceBuilder = Widget Function(
   FinanceApi api,
   RecordData user,
   int companyId,
+  RecordData license,
   VoidCallback logout,
 );
 
@@ -28,15 +29,18 @@ class _AccessGateState extends State<AccessGate> {
   final username = TextEditingController();
   final pin = TextEditingController();
   final confirmPin = TextEditingController();
+  final activationKey = TextEditingController();
   bool loading = true;
   bool busy = false;
   bool needsSetup = false;
   bool masterMode = false;
+  bool licenseBypass = false;
   bool hidePin = true;
   bool darkMode = false;
   double fontScale = 1;
   String? error;
   RecordData? user;
+  RecordData license = {};
   List<RecordData> companies = [];
   int? selectedCompany;
 
@@ -54,12 +58,24 @@ class _AccessGateState extends State<AccessGate> {
     username.dispose();
     pin.dispose();
     confirmPin.dispose();
+    activationKey.dispose();
     api.client.close();
     super.dispose();
   }
 
   Future<void> checkSetup() async {
     try {
+      final licenseResult = RecordData.from(
+        await api.request('/license/status'),
+      );
+      if (mounted) license = licenseResult;
+      final licenseStatus = '${licenseResult['status']}';
+      if (!licenseBypass &&
+          (licenseStatus == 'activation_required' ||
+              licenseStatus == 'blocked')) {
+        if (mounted) setState(() => loading = false);
+        return;
+      }
       final result = await api.request('/auth/bootstrap');
       if (mounted) {
         setState(() {
@@ -75,6 +91,50 @@ class _AccessGateState extends State<AccessGate> {
         });
       }
     }
+  }
+
+  Future<void> activateLicense() async {
+    if (busy) return;
+    final key = activationKey.text.trim().toUpperCase();
+    if (key.isEmpty) {
+      setState(() => error = 'INFORME A CHAVE DE ATIVAÇÃO.');
+      return;
+    }
+    setState(() {
+      busy = true;
+      error = null;
+    });
+    try {
+      license = RecordData.from(
+        await api.request('/license/activate', {'activationKey': key}),
+      );
+      activationKey.clear();
+      if (!mounted) return;
+      setState(() {
+        busy = false;
+        loading = true;
+      });
+      await checkSetup();
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          busy = false;
+          error = cleanError(e);
+        });
+      }
+    }
+  }
+
+  Future<void> openMasterAccess() async {
+    setState(() {
+      licenseBypass = true;
+      masterMode = true;
+      needsSetup = false;
+      username.text = 'ADMIN';
+      pin.clear();
+      error = null;
+      loading = false;
+    });
   }
 
   String cleanError(Object value) =>
@@ -160,8 +220,13 @@ class _AccessGateState extends State<AccessGate> {
     if (loading) {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
+    if (!licenseBypass &&
+        (license['status'] == 'activation_required' ||
+            license['status'] == 'blocked')) {
+      return licenseScreen();
+    }
     if (user != null && selectedCompany != null) {
-      return widget.builder(api, user!, selectedCompany!, logout);
+      return widget.builder(api, user!, selectedCompany!, license, logout);
     }
     return Theme(
       data: darkMode
@@ -176,6 +241,119 @@ class _AccessGateState extends State<AccessGate> {
         data: MediaQuery.of(context)
             .copyWith(textScaler: TextScaler.linear(fontScale)),
         child: user == null ? accessScreen() : companyScreen(),
+      ),
+    );
+  }
+
+  Widget licenseScreen() {
+    final blocked = license['status'] == 'blocked';
+    return Scaffold(
+      backgroundColor: darkMode ? const Color(0xFF111817) : _cream,
+      body: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(28),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 470),
+            child: Card(
+              child: Padding(
+                padding: const EdgeInsets.all(34),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const Text(
+                      'monalisa',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: _teal,
+                        fontSize: 34,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const Text(
+                      'F I N A N C E I R O',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: Color(0xFFB85B11),
+                        fontSize: 10,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 28),
+                    Icon(
+                      blocked
+                          ? Icons.lock_person_outlined
+                          : Icons.verified_user_outlined,
+                      size: 45,
+                      color: blocked ? Colors.redAccent : _teal,
+                    ),
+                    const SizedBox(height: 18),
+                    Text(
+                      blocked
+                          ? 'ACESSO TEMPORARIAMENTE BLOQUEADO'
+                          : 'ATIVAR ESTA INSTALAÇÃO',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Text(
+                      '${license['message'] ?? ''}',
+                      textAlign: TextAlign.center,
+                    ),
+                    if (!blocked) ...[
+                      const SizedBox(height: 24),
+                      TextField(
+                        controller: activationKey,
+                        textCapitalization: TextCapitalization.characters,
+                        inputFormatters: [UpperCaseTextFormatter()],
+                        decoration: const InputDecoration(
+                          labelText: 'CHAVE DE ATIVAÇÃO',
+                          prefixIcon: Icon(Icons.key_outlined),
+                        ),
+                        onSubmitted: (_) => activateLicense(),
+                      ),
+                      const SizedBox(height: 14),
+                      FilledButton.icon(
+                        onPressed: busy ? null : activateLicense,
+                        icon: const Icon(Icons.check_circle_outline),
+                        label: const Text('ATIVAR SISTEMA'),
+                      ),
+                    ],
+                    if (error != null) ...[
+                      const SizedBox(height: 12),
+                      Text(
+                        error!,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(color: Colors.redAccent),
+                      ),
+                    ],
+                    const SizedBox(height: 10),
+                    OutlinedButton.icon(
+                      onPressed: busy
+                          ? null
+                          : () async {
+                              setState(() {
+                                loading = true;
+                                error = null;
+                              });
+                              await checkSetup();
+                            },
+                      icon: const Icon(Icons.refresh),
+                      label: const Text('VERIFICAR NOVAMENTE'),
+                    ),
+                    TextButton.icon(
+                      onPressed: busy ? null : openMasterAccess,
+                      icon: const Icon(Icons.admin_panel_settings_outlined),
+                      label: const Text('ACESSO MESTRE MONALISA'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }

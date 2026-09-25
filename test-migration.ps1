@@ -8,6 +8,7 @@ New-Item -ItemType Directory -Force $folder | Out-Null
 $env:FINANCE_DB=Join-Path $folder 'legacy.db'
 $env:FINANCE_URL='http://127.0.0.1:5198'
 $env:FINANCE_AUTH_DISABLED='1'
+$env:MONALISA_LICENSE_DISABLED='1'
 function Call($path,$body=$null) {
   if($null -eq $body){return Invoke-RestMethod ('http://127.0.0.1:5198/api'+$path)}
   return Invoke-RestMethod ('http://127.0.0.1:5198/api'+$path) -Method Post -ContentType 'application/json' -Body ($body | ConvertTo-Json)
@@ -36,4 +37,5 @@ try {
   Remove-Item Env:\FINANCE_DB -ErrorAction SilentlyContinue
   Remove-Item Env:\FINANCE_URL -ErrorAction SilentlyContinue
   Remove-Item Env:\FINANCE_AUTH_DISABLED -ErrorAction SilentlyContinue
+  Remove-Item Env:\MONALISA_LICENSE_DISABLED -ErrorAction SilentlyContinue
 }

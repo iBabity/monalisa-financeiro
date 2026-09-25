@@ -55,6 +55,12 @@ Cada mutação financeira usa uma transação SQLite. As referências entre empr
 
 O servidor fica restrito a 127.0.0.1 e rejeita origens externas de navegador. Não existem integrações bancárias nem movimentações de dinheiro real.
 
+## Licenciamento remoto
+
+O projeto `license-server` fornece o Painel Central Monalisa. Cada cliente recebe uma chave exclusiva, que é vinculada à primeira instalação ativada. O painel permite colocar a licença como ativa, aviso, somente consulta ou bloqueada, além de liberar a troca de máquina. O bloqueio nunca apaga o banco do cliente. A instalação consulta o painel a cada cinco minutos e mantém um comprovante assinado por até três dias sem internet; depois desse prazo entra em somente consulta.
+
+O servidor central mantém a chave privada em `.private-license/license-signing-private.pem`, fora do Git e do instalador. O programa Windows contém somente a chave pública. Para testes locais, `iniciar.ps1` define `MONALISA_LICENSE_DISABLED=1`; essa exceção só existe na compilação Debug e não funciona no executável Release usado pelo instalador. O instalador comercial deve configurar `MONALISA_LICENSE_URL` com o endereço HTTPS em que o Painel Central for publicado.
+
 ## Atualização de parcelas
 
 O esquema 2 adiciona vínculo explícito, número e quantidade de parcelas. Há backup automático antes da migração de um banco com títulos. Parcelamentos antigos são vinculados apenas quando o histórico de criação identifica cada parcela sem ambiguidade (empresa, tipo, descrição, data, valor, pessoa, categoria, observação e momento da criação). Casos ambíguos permanecem independentes para evitar cancelamento indevido. O cancelamento em conjunto ocorre em uma transação e registra uma entrada de histórico por título cancelado.

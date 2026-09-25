@@ -4,6 +4,7 @@ $root=$PSScriptRoot
 $api=Join-Path $root 'api'
 $env:FINANCE_DB=Join-Path $root 'data\financeiro.db'
 $env:FINANCE_URL='http://127.0.0.1:5187'
+$env:MONALISA_LICENSE_DISABLED='1'
 New-Item -ItemType Directory -Force (Join-Path $root 'logs') | Out-Null
 $ready=$false
 try { $ready=(Invoke-RestMethod 'http://127.0.0.1:5187/api/health').status -eq 'ok' } catch {}

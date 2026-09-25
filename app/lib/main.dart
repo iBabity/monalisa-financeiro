@@ -58,10 +58,11 @@ class FinanceApp extends StatelessWidget {
       ),
     ),
     home: AccessGate(
-      builder: (api, user, companyId, logout) => Workspace(
+      builder: (api, user, companyId, license, logout) => Workspace(
         api: api,
         user: user,
         initialCompany: companyId,
+        license: license,
         onLogout: logout,
       ),
     ),
@@ -105,6 +106,7 @@ class _ReportFeature extends StatelessWidget {
 class Workspace extends StatefulWidget {
   final FinanceApi api;
   final RecordData user;
+  final RecordData license;
   final int initialCompany;
   final VoidCallback onLogout;
   const Workspace({
@@ -112,6 +114,7 @@ class Workspace extends StatefulWidget {
     required this.api,
     required this.user,
     required this.initialCompany,
+    required this.license,
     required this.onLogout,
   });
   @override
@@ -120,6 +123,7 @@ class Workspace extends StatefulWidget {
 
 class _WorkspaceState extends State<Workspace> {
   late final FinanceApi api = widget.api;
+  late RecordData license = widget.license;
   List<RecordData> companies = [],
       titles = [],
       parties = [],
@@ -203,6 +207,9 @@ class _WorkspaceState extends State<Workspace> {
       error = null;
     });
     try {
+      final currentLicense = RecordData.from(
+        await api.request('/license/status'),
+      );
       final cs = rows(await api.request('/companies'));
       final selected = cs.any((e) => e['id'] == company)
           ? company
@@ -211,6 +218,7 @@ class _WorkspaceState extends State<Workspace> {
       if (!mounted || request != generation) return;
       setState(() {
         companies = cs;
+        license = currentLicense;
         company = selected;
         if (roleForCompany(selected) == 'user' && !pageAllowed(page)) page = 0;
         titles = rows(data['titles']);
@@ -567,6 +575,41 @@ class _WorkspaceState extends State<Workspace> {
                       ],
                     ),
                   ),
+                  if (license['status'] == 'warning' ||
+                      license['status'] == 'read_only')
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 24,
+                        vertical: 12,
+                      ),
+                      color: license['status'] == 'read_only'
+                          ? const Color(0xFFD9EAF5)
+                          : const Color(0xFFFFE5B8),
+                      child: Row(
+                        children: [
+                          Icon(
+                            license['status'] == 'read_only'
+                                ? Icons.visibility_outlined
+                                : Icons.warning_amber_rounded,
+                            color: teal,
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Text(
+                              license['status'] == 'read_only'
+                                  ? 'SOMENTE CONSULTA • ${license['message'] ?? 'ENTRE EM CONTATO COM A MONALISA.'}'
+                                  : 'AVISO DA MONALISA • ${license['message'] ?? ''}',
+                              style: const TextStyle(
+                                color: teal,
+                                fontWeight: FontWeight.w700,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                   Expanded(
                     child: loading
                         ? const Center(child: CircularProgressIndicator())

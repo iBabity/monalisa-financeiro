@@ -10,6 +10,7 @@ builder.WebHost.UseUrls(Environment.GetEnvironmentVariable("FINANCE_URL") ?? "ht
 builder.Services.AddSingleton<Ledger>();
 builder.Services.AddSingleton<AuthSessions>();
 builder.Services.AddSingleton<MasterAccess>();
+builder.Services.AddSingleton<LicenseGuard>();
 var app = builder.Build();
 app.Use(async (ctx, next) => {
     var origin = ctx.Request.Headers.Origin.ToString();
@@ -21,7 +22,7 @@ app.Use(async (ctx, next) => {
 });
 app.Use(async (ctx, next) => {
     if(!ctx.Request.Path.StartsWithSegments("/api") || ctx.Request.Path.StartsWithSegments("/api/health") ||
-       ctx.Request.Path.StartsWithSegments("/api/auth/bootstrap") || ctx.Request.Path.StartsWithSegments("/api/auth/login")) { await next(); return; }
+       ctx.Request.Path.StartsWithSegments("/api/license") || ctx.Request.Path.StartsWithSegments("/api/auth/bootstrap") || ctx.Request.Path.StartsWithSegments("/api/auth/login")) { await next(); return; }
     var db=ctx.RequestServices.GetRequiredService<Ledger>();
     if(Environment.GetEnvironmentVariable("FINANCE_AUTH_DISABLED")=="1") { await next(); return; }
     var needsSetup=!db.HasUsers();
@@ -50,6 +51,15 @@ app.Use(async (ctx, next) => {
     }
     await next();
 });
+app.Use(async(ctx,next)=>{
+    if(!ctx.Request.Path.StartsWithSegments("/api")||ctx.Request.Path.StartsWithSegments("/api/health")||ctx.Request.Path.StartsWithSegments("/api/license")||ctx.Request.Path.StartsWithSegments("/api/auth")){await next();return;}
+    var license=await ctx.RequestServices.GetRequiredService<LicenseGuard>().Status();
+    var master=ctx.Items["user"] is AuthIdentity { Id:0 };
+    if(!master&&(license.Status=="blocked"||license.Status=="activation_required")){ctx.Response.StatusCode=423;await ctx.Response.WriteAsJsonAsync(new{error=license.Message,code="LICENSE_BLOCKED",license});return;}
+    var allowedReadOnly=ctx.Request.Path.StartsWithSegments("/api/auth")||ctx.Request.Path=="/api/backup";
+    if(!master&&license.Status=="read_only"&&ctx.Request.Method!="GET"&&!allowedReadOnly){ctx.Response.StatusCode=423;await ctx.Response.WriteAsJsonAsync(new{error=license.Message.Length>0?license.Message:"Licença em modo somente consulta.",code="LICENSE_READ_ONLY",license});return;}
+    ctx.Items["license"]=license;await next();
+});
 app.UseDefaultFiles();
 app.UseStaticFiles(new StaticFileOptions
 {
@@ -61,6 +71,9 @@ app.UseStaticFiles(new StaticFileOptions
     }
 });
 app.MapGet("/api/health", () => new { status = "ok", mode = "local-test" });
+app.MapGet("/api/license/status", async (LicenseGuard license) => await license.Status());
+app.MapPost("/api/license/activate", async (LicenseActivationInput x,LicenseGuard license) => await license.Activate(x.ActivationKey));
+app.MapPost("/api/license/refresh", async (LicenseGuard license) => await license.Status(true));
 app.MapGet("/api/auth/bootstrap", (Ledger db) => new { needsSetup=!db.HasUsers() });
 app.MapPost("/api/auth/bootstrap", (BootstrapInput x, Ledger db, AuthSessions sessions) => {
     var user=db.SetupAdministrator(x);var token=sessions.Create(user);return new {token,user=db.AccessContext(user)};

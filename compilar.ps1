@@ -12,4 +12,6 @@ try {
 } finally { Pop-Location }
 & C:\Tools\dotnet\dotnet.exe build (Join-Path $PSScriptRoot 'api')
 if($LASTEXITCODE -ne 0){throw 'Falha na compilação C#'}
+& C:\Tools\dotnet\dotnet.exe build (Join-Path $PSScriptRoot 'license-server')
+if($LASTEXITCODE -ne 0){throw 'Falha na compilação do Painel Central'}
 & (Join-Path $PSScriptRoot 'test-api.ps1')

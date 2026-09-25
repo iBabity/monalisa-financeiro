@@ -9,11 +9,13 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.12" />
     <PackageReference Include="QuestPDF" Version="2026.9.0" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
   </ItemGroup>
 
   <ItemGroup>
     <Content Remove="master-access-codes.json" />
     <EmbeddedResource Include="master-access-codes.json" />
+    <EmbeddedResource Include="license-public.pem" />
   </ItemGroup>
 
 </Project>

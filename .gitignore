@@ -9,6 +9,8 @@ api/wwwroot/
 artifacts/
 tools/
 .private-support/
+.private-license/
+license-server/data/
 .vs/
 .idea/
 .dart_tool/
