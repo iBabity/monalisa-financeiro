@@ -57,7 +57,7 @@ O servidor fica restrito a 127.0.0.1 e rejeita origens externas de navegador. N�
 
 ## Licenciamento remoto
 
-O projeto `license-server` fornece o Painel Central Monalisa. Cada cliente recebe uma chave exclusiva, que é vinculada à primeira instalação ativada. O painel permite colocar a licença como ativa, aviso, somente consulta ou bloqueada, além de liberar a troca de máquina. O bloqueio nunca apaga o banco do cliente. A instalação consulta o painel a cada cinco minutos e mantém um comprovante assinado por até três dias sem internet; depois desse prazo entra em somente consulta.
+O projeto `license-server` fornece o Painel Central Monalisa. O titular pode ser uma empresa com CNPJ ou uma pessoa com CPF. Cada máquina recebe sua própria chave e pode ser ativada, avisada, limitada, bloqueada ou liberada independentemente das demais. O bloqueio nunca apaga o banco do cliente. A instalação consulta o painel a cada cinco minutos e mantém um comprovante assinado por até três dias sem internet; depois desse prazo entra em somente consulta.
 
 O servidor central mantém a chave privada em `.private-license/license-signing-private.pem`, fora do Git e do instalador. O programa Windows contém somente a chave pública. Para testes locais, `iniciar.ps1` define `MONALISA_LICENSE_DISABLED=1`; essa exceção só existe na compilação Debug e não funciona no executável Release usado pelo instalador. O instalador comercial deve configurar `MONALISA_LICENSE_URL` com o endereço HTTPS em que o Painel Central for publicado.
 
