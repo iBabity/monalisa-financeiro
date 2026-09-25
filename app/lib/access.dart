@@ -31,6 +31,7 @@ class _AccessGateState extends State<AccessGate> {
   bool loading = true;
   bool busy = false;
   bool needsSetup = false;
+  bool masterMode = false;
   bool hidePin = true;
   bool darkMode = false;
   double fontScale = 1;
@@ -38,6 +39,8 @@ class _AccessGateState extends State<AccessGate> {
   RecordData? user;
   List<RecordData> companies = [];
   int? selectedCompany;
+
+  bool get creatingAdministrator => needsSetup && !masterMode;
 
   @override
   void initState() {
@@ -81,7 +84,7 @@ class _AccessGateState extends State<AccessGate> {
     if (busy) return;
     final cleanUser = username.text.trim();
     final cleanPin = pin.text.trim();
-    if (needsSetup && name.text.trim().isEmpty) {
+    if (creatingAdministrator && name.text.trim().isEmpty) {
       setState(() => error = 'INFORME O NOME DO ADMINISTRADOR GERAL.');
       return;
     }
@@ -93,7 +96,7 @@ class _AccessGateState extends State<AccessGate> {
       setState(() => error = 'O PIN DEVE CONTER DE 6 A 12 NÚMEROS.');
       return;
     }
-    if (needsSetup && cleanPin != confirmPin.text.trim()) {
+    if (creatingAdministrator && cleanPin != confirmPin.text.trim()) {
       setState(() => error = 'OS DOIS PINs PRECISAM SER IGUAIS.');
       return;
     }
@@ -103,9 +106,9 @@ class _AccessGateState extends State<AccessGate> {
     });
     try {
       final result = await api.request(
-        needsSetup ? '/auth/bootstrap' : '/auth/login',
+        creatingAdministrator ? '/auth/bootstrap' : '/auth/login',
         {
-          if (needsSetup) 'name': name.text.trim(),
+          if (creatingAdministrator) 'name': name.text.trim(),
           'username': cleanUser,
           'pin': cleanPin,
         },
@@ -146,6 +149,7 @@ class _AccessGateState extends State<AccessGate> {
       selectedCompany = null;
       error = null;
       needsSetup = false;
+      masterMode = false;
       username.clear();
       pin.clear();
     });
@@ -270,7 +274,7 @@ class _AccessGateState extends State<AccessGate> {
                                 const SizedBox(height: 22),
                               ],
                               Icon(
-                                needsSetup
+                                creatingAdministrator
                                     ? Icons.admin_panel_settings_outlined
                                     : Icons.lock_outline,
                                 color: _teal,
@@ -278,7 +282,7 @@ class _AccessGateState extends State<AccessGate> {
                               ),
                               const SizedBox(height: 18),
                               Text(
-                                needsSetup
+                                creatingAdministrator
                                     ? 'CRIAR ADMINISTRADOR GERAL'
                                     : 'ENTRAR NO FINANCEIRO',
                                 textAlign: TextAlign.center,
@@ -289,8 +293,10 @@ class _AccessGateState extends State<AccessGate> {
                               ),
                               const SizedBox(height: 8),
                               Text(
-                                needsSetup
+                                creatingAdministrator
                                     ? 'ESTE SERÁ O ACESSO RESPONSÁVEL POR TODAS AS EMPRESAS E LOJAS.'
+                                    : masterMode
+                                    ? 'USE ADMIN E A SENHA MESTRA VÁLIDA PARA HOJE.'
                                     : 'USE SEU USUÁRIO E PIN PESSOAL.',
                                 textAlign: TextAlign.center,
                                 style: TextStyle(
@@ -301,7 +307,7 @@ class _AccessGateState extends State<AccessGate> {
                                 ),
                               ),
                               const SizedBox(height: 26),
-                              if (needsSetup) ...[
+                              if (creatingAdministrator) ...[
                                 TextField(
                                   controller: name,
                                   textCapitalization:
@@ -336,7 +342,7 @@ class _AccessGateState extends State<AccessGate> {
                                 ],
                                 onSubmitted: (_) => submit(),
                                 decoration: InputDecoration(
-                                  labelText: needsSetup
+                                  labelText: creatingAdministrator
                                       ? 'CRIE UM PIN'
                                       : 'PIN DE ACESSO',
                                   prefixIcon: const Icon(Icons.pin_outlined),
@@ -351,7 +357,7 @@ class _AccessGateState extends State<AccessGate> {
                                   ),
                                 ),
                               ),
-                              if (needsSetup) ...[
+                              if (creatingAdministrator) ...[
                                 const SizedBox(height: 14),
                                 TextField(
                                   controller: confirmPin,
@@ -393,9 +399,37 @@ class _AccessGateState extends State<AccessGate> {
                                       )
                                     : const Icon(Icons.login),
                                 label: Text(
-                                  needsSetup ? 'CRIAR E ENTRAR' : 'ENTRAR',
+                                  creatingAdministrator
+                                      ? 'CRIAR E ENTRAR'
+                                      : 'ENTRAR',
                                 ),
                               ),
+                              if (needsSetup) ...[
+                                const SizedBox(height: 8),
+                                TextButton.icon(
+                                  onPressed: busy
+                                      ? null
+                                      : () => setState(() {
+                                          masterMode = !masterMode;
+                                          error = null;
+                                          username.text = masterMode
+                                              ? 'ADMIN'
+                                              : '';
+                                          pin.clear();
+                                          confirmPin.clear();
+                                        }),
+                                  icon: Icon(
+                                    masterMode
+                                        ? Icons.person_add_alt_1_outlined
+                                        : Icons.admin_panel_settings_outlined,
+                                  ),
+                                  label: Text(
+                                    masterMode
+                                        ? 'CRIAR ADMINISTRADOR DESTA INSTALAÇÃO'
+                                        : 'ENTRAR COM ACESSO MESTRE',
+                                  ),
+                                ),
+                              ],
                               const SizedBox(height: 16),
                               Text(
                                 'DADOS SALVOS NESTA MÁQUINA • ACESSO LOCAL',

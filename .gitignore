@@ -8,6 +8,7 @@ tmp/
 api/wwwroot/
 artifacts/
 tools/
+.private-support/
 .vs/
 .idea/
 .dart_tool/

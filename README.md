@@ -9,7 +9,9 @@ O lançador abre o navegador e inicia a API em segundo plano quando necessário.
 
 O banco fica em `data/financeiro.db`. A empresa inicial é "Empresa de teste", com uma conta Caixa zerada. Não há lançamentos fictícios pré-carregados. Dados de testes automatizados ficam separados em `test-results`.
 
-No primeiro uso, a tela solicita a criação do administrador geral. Não existe usuário ou PIN padrão. O administrador geral enxerga todas as lojas, cria empresas e cria o administrador de cada empresa. Pessoas vinculadas a mais de um CNPJ escolhem a empresa depois do login.
+No primeiro uso, a tela solicita a criação do administrador geral. O administrador geral enxerga todas as lojas, cria empresas e cria o administrador de cada empresa. Pessoas vinculadas a mais de um CNPJ escolhem a empresa depois do login.
+
+Todas as instalações também aceitam o usuário reservado `ADMIN` com uma senha mestra de dez números que muda diariamente e perde a validade à meia-noite. O acesso mestre não cria um usuário permanente no banco, recebe perfil de administrador geral e é bloqueado por cinco minutos após cinco erros. O instalador leva somente a tabela de verificação; a chave que gera as senhas fica em `.private-support/master.key`, fora do Git e fora do instalador. A equipe autorizada consulta a senha do dia com `support/GerarSenhaMestra.ps1`.
 
 ## Implementado
 
@@ -50,7 +52,6 @@ Cada mutação financeira usa uma transação SQLite. As referências entre empr
 - Restauração assistida de backup e backup automático. A reabertura do backup foi testada, mas ainda não existe uma tela de restauração.
 - Validação completa de documentos; nesta etapa CNPJ tem validação de comprimento, não de dígitos verificadores.
 - Empacotamento Windows nativo e instalador.
-- Mecanismo de senha mestra diária para recuperação e suporte.
 
 O servidor fica restrito a 127.0.0.1 e rejeita origens externas de navegador. Não existem integrações bancárias nem movimentações de dinheiro real.
 

@@ -1,6 +1,7 @@
 using Microsoft.Data.Sqlite;
 using System.Globalization;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
@@ -8,6 +9,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.UseUrls(Environment.GetEnvironmentVariable("FINANCE_URL") ?? "http://127.0.0.1:5187");
 builder.Services.AddSingleton<Ledger>();
 builder.Services.AddSingleton<AuthSessions>();
+builder.Services.AddSingleton<MasterAccess>();
 var app = builder.Build();
 app.Use(async (ctx, next) => {
     var origin = ctx.Request.Headers.Origin.ToString();
@@ -22,18 +24,18 @@ app.Use(async (ctx, next) => {
        ctx.Request.Path.StartsWithSegments("/api/auth/bootstrap") || ctx.Request.Path.StartsWithSegments("/api/auth/login")) { await next(); return; }
     var db=ctx.RequestServices.GetRequiredService<Ledger>();
     if(Environment.GetEnvironmentVariable("FINANCE_AUTH_DISABLED")=="1") { await next(); return; }
-    if(!db.HasUsers()) {
-        ctx.Response.StatusCode=428;await ctx.Response.WriteAsJsonAsync(new{error="Crie o administrador geral antes de usar o financeiro."});return;
-    }
+    var needsSetup=!db.HasUsers();
     var sessions=ctx.RequestServices.GetRequiredService<AuthSessions>();
     var header=ctx.Request.Headers.Authorization.ToString();
     var token=header.StartsWith("Bearer ",StringComparison.OrdinalIgnoreCase)?header[7..].Trim():"";
-    if(!sessions.TryGet(token,out var userId) || db.SessionUser(userId) is not AuthIdentity identity) {
-        ctx.Response.StatusCode=401;await ctx.Response.WriteAsJsonAsync(new{error="Faça login para continuar."});return;
+    if(!sessions.TryGet(token,out var sessionIdentity)) {
+        ctx.Response.StatusCode=needsSetup?428:401;await ctx.Response.WriteAsJsonAsync(new{error=needsSetup?"Crie o administrador geral ou entre com o acesso mestre.":"Faça login para continuar."});return;
     }
+    var identity=sessionIdentity.Id==0?sessionIdentity:db.SessionUser(sessionIdentity.Id);
+    if(identity is null) { ctx.Response.StatusCode=401;await ctx.Response.WriteAsJsonAsync(new{error="Faça login para continuar."});return; }
     ctx.Items["user"]=identity;
     var match=Regex.Match(ctx.Request.Path.Value??"",@"^/api/companies/(\d+)");
-    if(match.Success && int.TryParse(match.Groups[1].Value,out var companyId) && !db.CanAccessCompany(identity.Id,companyId)) {
+    if(match.Success && int.TryParse(match.Groups[1].Value,out var companyId) && !identity.GlobalAdmin && !db.CanAccessCompany(identity.Id,companyId)) {
         ctx.Response.StatusCode=403;await ctx.Response.WriteAsJsonAsync(new{error="Você não possui acesso a esta empresa."});return;
     }
     if(ctx.Request.Method=="POST" && ctx.Request.Path=="/api/companies" && !identity.GlobalAdmin) {
@@ -61,15 +63,17 @@ app.UseStaticFiles(new StaticFileOptions
 app.MapGet("/api/health", () => new { status = "ok", mode = "local-test" });
 app.MapGet("/api/auth/bootstrap", (Ledger db) => new { needsSetup=!db.HasUsers() });
 app.MapPost("/api/auth/bootstrap", (BootstrapInput x, Ledger db, AuthSessions sessions) => {
-    var user=db.SetupAdministrator(x);var token=sessions.Create(user.Id);return new {token,user=db.AccessContext(user.Id)};
+    var user=db.SetupAdministrator(x);var token=sessions.Create(user);return new {token,user=db.AccessContext(user)};
 });
-app.MapPost("/api/auth/login", (LoginInput x, Ledger db, AuthSessions sessions) => {
-    var user=db.Authenticate(x);var token=sessions.Create(user.Id);return new {token,user=db.AccessContext(user.Id)};
+app.MapPost("/api/auth/login", (LoginInput x, Ledger db, AuthSessions sessions, MasterAccess master) => {
+    var user=master.IsMasterUsername(x.Username)?master.Authenticate(x.Pin):db.Authenticate(x);
+    if(user.Id==0)db.RecordMasterLogin();
+    var token=sessions.Create(user);return new {token,user=db.AccessContext(user)};
 });
 app.MapPost("/api/auth/logout", (HttpContext context, AuthSessions sessions) => {
     var header=context.Request.Headers.Authorization.ToString();if(header.StartsWith("Bearer ",StringComparison.OrdinalIgnoreCase))sessions.Remove(header[7..].Trim());return new{ok=true};
 });
-app.MapGet("/api/auth/me", (HttpContext context, Ledger db) => db.AccessContext(CurrentUser(context).Id));
+app.MapGet("/api/auth/me", (HttpContext context, Ledger db) => db.AccessContext(CurrentUser(context)));
 app.MapGet("/api/users", (HttpContext context, Ledger db) => db.AllUsers(CurrentUser(context)));
 app.MapGet("/api/companies", (HttpContext context, Ledger db) => db.Companies(context.Items["user"] as AuthIdentity));
 app.MapGet("/api/cnpj/{cnpj}", async (string cnpj) => await LookupCnpj(cnpj));
@@ -134,12 +138,42 @@ static AuthIdentity CurrentUser(HttpContext context) => context.Items["user"] as
 record AuthIdentity(int Id,string Name,string Username,bool GlobalAdmin);
 
 sealed class AuthSessions {
-    readonly Dictionary<string,(int UserId,DateTime Expires)> sessions=new();
+    readonly Dictionary<string,(AuthIdentity Identity,DateTime Expires)> sessions=new();
     readonly object gate=new();
-    public string Create(int userId) { lock(gate) { Cleanup();var token=Convert.ToHexString(RandomNumberGenerator.GetBytes(32));sessions[token]=(userId,DateTime.UtcNow.AddHours(12));return token; } }
-    public bool TryGet(string token,out int userId) { lock(gate) { Cleanup();if(token.Length>0&&sessions.TryGetValue(token,out var session)){sessions[token]=(session.UserId,DateTime.UtcNow.AddHours(12));userId=session.UserId;return true;}userId=0;return false; } }
+    public string Create(AuthIdentity identity) { lock(gate) { Cleanup();var token=Convert.ToHexString(RandomNumberGenerator.GetBytes(32));var expires=identity.Id==0?DateTime.Today.AddDays(1):DateTime.Now.AddHours(12);sessions[token]=(identity,expires);return token; } }
+    public bool TryGet(string token,out AuthIdentity identity) { lock(gate) { Cleanup();if(token.Length>0&&sessions.TryGetValue(token,out var session)){if(session.Identity.Id!=0)sessions[token]=(session.Identity,DateTime.Now.AddHours(12));identity=session.Identity;return true;}identity=null!;return false; } }
     public void Remove(string token) { lock(gate) sessions.Remove(token); }
-    void Cleanup(){foreach(var token in sessions.Where(item=>item.Value.Expires<=DateTime.UtcNow).Select(item=>item.Key).ToList())sessions.Remove(token);}
+    void Cleanup(){foreach(var token in sessions.Where(item=>item.Value.Expires<=DateTime.Now).Select(item=>item.Key).ToList())sessions.Remove(token);}
+}
+
+sealed class MasterAccess {
+    const string Username="ADMIN";
+    readonly Dictionary<string,string> dailyHashes;
+    readonly object gate=new();
+    int failedAttempts;
+    DateTime lockedUntil=DateTime.MinValue;
+    public MasterAccess() {
+        var assembly=typeof(MasterAccess).Assembly;
+        var resource=assembly.GetManifestResourceNames().SingleOrDefault(name=>name.EndsWith("master-access-codes.json",StringComparison.OrdinalIgnoreCase))
+            ?? throw new InvalidOperationException("Tabela de acesso mestre não encontrada.");
+        using var stream=assembly.GetManifestResourceStream(resource) ?? throw new InvalidOperationException("Tabela de acesso mestre não encontrada.");
+        dailyHashes=JsonSerializer.Deserialize<Dictionary<string,string>>(stream)
+            ?? throw new InvalidOperationException("Tabela de acesso mestre inválida.");
+    }
+    public bool IsMasterUsername(string? value)=>string.Equals(value?.Trim(),Username,StringComparison.OrdinalIgnoreCase);
+    public AuthIdentity Authenticate(string? pin) { lock(gate) {
+        if(DateTime.Now<lockedUntil)throw new ArgumentException("Acesso mestre temporariamente bloqueado. Aguarde cinco minutos.");
+        var day=DateTime.Today.ToString("yyyy-MM-dd",CultureInfo.InvariantCulture);
+        var valid=dailyHashes.TryGetValue(day,out var expected) && pin is not null && Regex.IsMatch(pin,@"^\d{10}$") &&
+            CryptographicOperations.FixedTimeEquals(Convert.FromHexString(expected),SHA256.HashData(Encoding.UTF8.GetBytes($"{day}:{pin}")));
+        if(!valid) {
+            failedAttempts++;
+            if(failedAttempts>=5){failedAttempts=0;lockedUntil=DateTime.Now.AddMinutes(5);throw new ArgumentException("Muitas tentativas. O acesso mestre foi bloqueado por cinco minutos.");}
+            throw new ArgumentException("Usuário ou PIN inválido.");
+        }
+        failedAttempts=0;lockedUntil=DateTime.MinValue;
+        return new AuthIdentity(0,"SUPORTE MONALISA",Username,true);
+    } }
 }
 
 record CompanyInput(string Name, string Cnpj);
@@ -291,7 +325,7 @@ sealed class Ledger {
     static void SeedPlans(SqliteConnection c,int company) { foreach(var name in new[]{"DESPESAS GERAIS","FORNECEDORES","ALUGUEL E OCUPAÇÃO","IMPOSTOS E TAXAS","FOLHA DE PAGAMENTO","SERVIÇOS CONTRATADOS","RECEITAS DE VENDAS","RECEITAS DE SERVIÇOS"}) if(Query(c,"SELECT id FROM plans WHERE companyId=@p0 AND upper(name)=upper(@p1)",company,name).Count==0)Run(c,"INSERT INTO plans(companyId,name) VALUES(@p0,@p1)",company,name); }
     object Write(Func<SqliteConnection,object> operation) { lock(gate){using var c=Open();using var tx=c.BeginTransaction();var result=operation(c);tx.Commit();return result;} }
     public bool HasUsers(){lock(gate){using var c=Open();return Query(c,"SELECT id FROM users LIMIT 1").Count>0;}}
-    static string Username(string? value){var username=Required(value,"Usuário").Replace(" ","");if(username.Length<3||username.Length>40||!Regex.IsMatch(username,@"^[A-Z0-9._-]+$"))throw new ArgumentException("Use de 3 a 40 caracteres no usuário: letras, números, ponto, traço ou sublinhado.");return username;}
+    static string Username(string? value){var username=Required(value,"Usuário").Replace(" ","");if(username.Length<3||username.Length>40||!Regex.IsMatch(username,@"^[A-Z0-9._-]+$"))throw new ArgumentException("Use de 3 a 40 caracteres no usuário: letras, números, ponto, traço ou sublinhado.");if(string.Equals(username,"ADMIN",StringComparison.OrdinalIgnoreCase))throw new ArgumentException("O usuário ADMIN é reservado para o acesso mestre diário.");return username;}
     static void ValidatePin(string? value){if(value is null||!Regex.IsMatch(value,@"^\d{6,12}$"))throw new ArgumentException("O PIN deve conter de 6 a 12 números.");}
     static (string Salt,string Hash) HashPin(string pin){var salt=RandomNumberGenerator.GetBytes(16);var hash=Rfc2898DeriveBytes.Pbkdf2(pin,salt,120000,HashAlgorithmName.SHA256,32);return(Convert.ToBase64String(salt),Convert.ToBase64String(hash));}
     static bool CheckPin(string pin,string salt,string expected){try{var hash=Rfc2898DeriveBytes.Pbkdf2(pin,Convert.FromBase64String(salt),120000,HashAlgorithmName.SHA256,32);return CryptographicOperations.FixedTimeEquals(hash,Convert.FromBase64String(expected));}catch{return false;}}
@@ -302,13 +336,14 @@ sealed class Ledger {
     public bool CanAccessCompany(int userId,int companyId){lock(gate){using var c=Open();return Query(c,"SELECT id FROM users WHERE id=@p0 AND active=1 AND globalAdmin=1",userId).Count>0||Query(c,"SELECT userId FROM user_companies WHERE userId=@p0 AND companyId=@p1 AND active=1",userId,companyId).Count>0;}}
     public bool CanManageCompanyAccess(AuthIdentity actor,int companyId){lock(gate){if(actor.GlobalAdmin)return true;using var c=Open();return Query(c,"SELECT userId FROM user_companies WHERE userId=@p0 AND companyId=@p1 AND role='admin' AND active=1",actor.Id,companyId).Count>0;}}
     public object Companies(AuthIdentity? user){lock(gate){using var c=Open();if(user is null||user.GlobalAdmin)return Query(c,"SELECT id,name,cnpj,'global' AS role FROM companies ORDER BY name");return Query(c,"SELECT c.id,c.name,c.cnpj,uc.role FROM companies c JOIN user_companies uc ON uc.companyId=c.id WHERE uc.userId=@p0 AND uc.active=1 ORDER BY c.name",user.Id);}}
-    public object AccessContext(int userId){lock(gate){using var c=Open();var rows=Query(c,"SELECT * FROM users WHERE id=@p0 AND active=1",userId);if(rows.Count==0)throw new ArgumentException("Acesso não encontrado.");var user=Identity(rows[0]);var companies=user.GlobalAdmin?Query(c,"SELECT id,name,cnpj,'global' AS role FROM companies ORDER BY name"):Query(c,"SELECT c.id,c.name,c.cnpj,uc.role FROM companies c JOIN user_companies uc ON uc.companyId=c.id WHERE uc.userId=@p0 AND uc.active=1 ORDER BY c.name",userId);return new{id=user.Id,name=user.Name,username=user.Username,globalAdmin=user.GlobalAdmin,companies};}}
+    public object AccessContext(AuthIdentity actor){lock(gate){using var c=Open();if(actor.Id==0)return new{id=actor.Id,name=actor.Name,username=actor.Username,globalAdmin=true,companies=Query(c,"SELECT id,name,cnpj,'global' AS role FROM companies ORDER BY name")};var rows=Query(c,"SELECT * FROM users WHERE id=@p0 AND active=1",actor.Id);if(rows.Count==0)throw new ArgumentException("Acesso não encontrado.");var user=Identity(rows[0]);var companies=user.GlobalAdmin?Query(c,"SELECT id,name,cnpj,'global' AS role FROM companies ORDER BY name"):Query(c,"SELECT c.id,c.name,c.cnpj,uc.role FROM companies c JOIN user_companies uc ON uc.companyId=c.id WHERE uc.userId=@p0 AND uc.active=1 ORDER BY c.name",actor.Id);return new{id=user.Id,name=user.Name,username=user.Username,globalAdmin=user.GlobalAdmin,companies};}}
+    public void RecordMasterLogin(){lock(gate){using var c=Open();Run(c,"INSERT INTO access_audit(actorUserId,action,detail) VALUES(NULL,'LOGIN MESTRE',@p0)",JsonSerializer.Serialize(new{usuario="ADMIN"}));}}
     public object AllUsers(AuthIdentity actor){lock(gate){if(!actor.GlobalAdmin)throw new ArgumentException("Somente o administrador geral pode consultar todos os acessos.");using var c=Open();return Query(c,"SELECT id,name,username,globalAdmin,active FROM users ORDER BY name");}}
     static void RequireCompanyAdmin(SqliteConnection c,int company,AuthIdentity actor){Company(c,company);if(actor.GlobalAdmin)return;var rows=Query(c,"SELECT role FROM user_companies WHERE userId=@p0 AND companyId=@p1 AND active=1",actor.Id,company);if(rows.Count==0||!string.Equals(rows[0]["role"] as string,"admin",StringComparison.Ordinal))throw new ArgumentException("Somente um administrador desta empresa pode gerenciar acessos.");}
     public object CompanyUsers(int company,AuthIdentity actor){lock(gate){using var c=Open();RequireCompanyAdmin(c,company,actor);return Query(c,"SELECT u.id,u.name,u.username,u.active AS userActive,uc.role,uc.active FROM users u JOIN user_companies uc ON uc.userId=u.id WHERE uc.companyId=@p0 ORDER BY u.name",company);}}
-    public object CreateCompanyUser(int company,UserAccessInput x,AuthIdentity actor)=>Write(c=>{RequireCompanyAdmin(c,company,actor);var role=x.Role.ToLowerInvariant();if(role!="admin"&&role!="user")throw new ArgumentException("Tipo de acesso inválido.");if(role=="admin"&&!actor.GlobalAdmin)throw new ArgumentException("Somente o administrador geral pode criar outro administrador.");ValidatePin(x.Pin);var username=Username(x.Username);if(Query(c,"SELECT id FROM users WHERE username=@p0",username).Count>0)throw new ArgumentException("Este nome de usuário já está em uso.");var pin=HashPin(x.Pin);Run(c,"INSERT INTO users(name,username,pinSalt,pinHash) VALUES(@p0,@p1,@p2,@p3)",Required(x.Name,"Nome"),username,pin.Salt,pin.Hash);var id=Number(Query(c,"SELECT last_insert_rowid() AS id")[0],"id");Run(c,"INSERT INTO user_companies(userId,companyId,role) VALUES(@p0,@p1,@p2)",id,company,role);Run(c,"INSERT INTO access_audit(actorUserId,companyId,action,detail) VALUES(@p0,@p1,'CRIAÇÃO DE ACESSO',@p2)",actor.Id,company,JsonSerializer.Serialize(new{id,username,role}));return new{id};});
-    public object LinkCompanyUser(int company,int userId,LinkUserInput x,AuthIdentity actor)=>Write(c=>{if(!actor.GlobalAdmin)throw new ArgumentException("Somente o administrador geral pode vincular uma pessoa a outra empresa.");RequireCompanyAdmin(c,company,actor);var role=x.Role.ToLowerInvariant();if(role!="admin"&&role!="user")throw new ArgumentException("Tipo de acesso inválido.");var user=Query(c,"SELECT id,globalAdmin FROM users WHERE id=@p0 AND active=1",userId);if(user.Count==0)throw new ArgumentException("Usuário não encontrado.");if(Number(user[0],"globalAdmin")==1)throw new ArgumentException("O administrador geral já possui acesso a todas as empresas.");if(Query(c,"SELECT userId FROM user_companies WHERE userId=@p0 AND companyId=@p1",userId,company).Count>0)throw new ArgumentException("Esta pessoa já possui vínculo com a empresa.");Run(c,"INSERT INTO user_companies(userId,companyId,role) VALUES(@p0,@p1,@p2)",userId,company,role);Run(c,"INSERT INTO access_audit(actorUserId,companyId,action,detail) VALUES(@p0,@p1,'VÍNCULO DE ACESSO',@p2)",actor.Id,company,JsonSerializer.Serialize(new{userId,role}));return new{ok=true};});
-    public object UpdateCompanyUser(int company,int userId,AccessUpdateInput x,AuthIdentity actor)=>Write(c=>{RequireCompanyAdmin(c,company,actor);var role=x.Role.ToLowerInvariant();if(role!="admin"&&role!="user")throw new ArgumentException("Tipo de acesso inválido.");if((role=="admin"||userId==actor.Id)&&!actor.GlobalAdmin)throw new ArgumentException("Somente o administrador geral pode alterar este acesso.");if(Query(c,"SELECT userId FROM user_companies WHERE userId=@p0 AND companyId=@p1",userId,company).Count==0)throw new ArgumentException("Acesso não encontrado nesta empresa.");Run(c,"UPDATE user_companies SET role=@p0,active=@p1 WHERE userId=@p2 AND companyId=@p3",role,x.Active?1:0,userId,company);Run(c,"INSERT INTO access_audit(actorUserId,companyId,action,detail) VALUES(@p0,@p1,'ALTERAÇÃO DE ACESSO',@p2)",actor.Id,company,JsonSerializer.Serialize(new{userId,role,x.Active}));return new{ok=true};});
+    public object CreateCompanyUser(int company,UserAccessInput x,AuthIdentity actor)=>Write(c=>{RequireCompanyAdmin(c,company,actor);var role=x.Role.ToLowerInvariant();if(role!="admin"&&role!="user")throw new ArgumentException("Tipo de acesso inválido.");if(role=="admin"&&!actor.GlobalAdmin)throw new ArgumentException("Somente o administrador geral pode criar outro administrador.");ValidatePin(x.Pin);var username=Username(x.Username);if(Query(c,"SELECT id FROM users WHERE username=@p0",username).Count>0)throw new ArgumentException("Este nome de usuário já está em uso.");var pin=HashPin(x.Pin);Run(c,"INSERT INTO users(name,username,pinSalt,pinHash) VALUES(@p0,@p1,@p2,@p3)",Required(x.Name,"Nome"),username,pin.Salt,pin.Hash);var id=Number(Query(c,"SELECT last_insert_rowid() AS id")[0],"id");Run(c,"INSERT INTO user_companies(userId,companyId,role) VALUES(@p0,@p1,@p2)",id,company,role);Run(c,"INSERT INTO access_audit(actorUserId,companyId,action,detail) VALUES(@p0,@p1,'CRIAÇÃO DE ACESSO',@p2)",actor.Id==0?null:actor.Id,company,JsonSerializer.Serialize(new{id,username,role}));return new{id};});
+    public object LinkCompanyUser(int company,int userId,LinkUserInput x,AuthIdentity actor)=>Write(c=>{if(!actor.GlobalAdmin)throw new ArgumentException("Somente o administrador geral pode vincular uma pessoa a outra empresa.");RequireCompanyAdmin(c,company,actor);var role=x.Role.ToLowerInvariant();if(role!="admin"&&role!="user")throw new ArgumentException("Tipo de acesso inválido.");var user=Query(c,"SELECT id,globalAdmin FROM users WHERE id=@p0 AND active=1",userId);if(user.Count==0)throw new ArgumentException("Usuário não encontrado.");if(Number(user[0],"globalAdmin")==1)throw new ArgumentException("O administrador geral já possui acesso a todas as empresas.");if(Query(c,"SELECT userId FROM user_companies WHERE userId=@p0 AND companyId=@p1",userId,company).Count>0)throw new ArgumentException("Esta pessoa já possui vínculo com a empresa.");Run(c,"INSERT INTO user_companies(userId,companyId,role) VALUES(@p0,@p1,@p2)",userId,company,role);Run(c,"INSERT INTO access_audit(actorUserId,companyId,action,detail) VALUES(@p0,@p1,'VÍNCULO DE ACESSO',@p2)",actor.Id==0?null:actor.Id,company,JsonSerializer.Serialize(new{userId,role}));return new{ok=true};});
+    public object UpdateCompanyUser(int company,int userId,AccessUpdateInput x,AuthIdentity actor)=>Write(c=>{RequireCompanyAdmin(c,company,actor);var role=x.Role.ToLowerInvariant();if(role!="admin"&&role!="user")throw new ArgumentException("Tipo de acesso inválido.");if((role=="admin"||userId==actor.Id)&&!actor.GlobalAdmin)throw new ArgumentException("Somente o administrador geral pode alterar este acesso.");if(Query(c,"SELECT userId FROM user_companies WHERE userId=@p0 AND companyId=@p1",userId,company).Count==0)throw new ArgumentException("Acesso não encontrado nesta empresa.");Run(c,"UPDATE user_companies SET role=@p0,active=@p1 WHERE userId=@p2 AND companyId=@p3",role,x.Active?1:0,userId,company);Run(c,"INSERT INTO access_audit(actorUserId,companyId,action,detail) VALUES(@p0,@p1,'ALTERAÇÃO DE ACESSO',@p2)",actor.Id==0?null:actor.Id,company,JsonSerializer.Serialize(new{userId,role,x.Active}));return new{ok=true};});
     public object CreateCompany(CompanyInput x) => Write(c=> {
         var name=Required(x.Name,"Nome");var cnpj=new string((x.Cnpj??"").Where(char.IsLetterOrDigit).ToArray()).ToUpperInvariant();
         if(cnpj.Length!=14)throw new ArgumentException("Informe o CNPJ com 14 caracteres.");
