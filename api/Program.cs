@@ -11,7 +11,8 @@ builder.Services.AddSingleton<AuthSessions>();
 var app = builder.Build();
 app.Use(async (ctx, next) => {
     var origin = ctx.Request.Headers.Origin.ToString();
-    if (origin.Length > 0 && origin != "http://127.0.0.1:5187" && origin != "http://localhost:5187") { ctx.Response.StatusCode = 403; return; }
+    var localOrigin=$"{ctx.Request.Scheme}://{ctx.Request.Host}";
+    if (origin.Length > 0 && !string.Equals(origin,localOrigin,StringComparison.OrdinalIgnoreCase)) { ctx.Response.StatusCode = 403; return; }
     try { await next(); }
     catch (ArgumentException ex) { ctx.Response.StatusCode = 400; await ctx.Response.WriteAsJsonAsync(new { error = ex.Message }); }
     catch (SqliteException ex) when (ex.SqliteErrorCode == 19) { ctx.Response.StatusCode = 409; await ctx.Response.WriteAsJsonAsync(new { error = "Registro duplicado ou referência inválida." }); }
@@ -37,6 +38,13 @@ app.Use(async (ctx, next) => {
     }
     if(ctx.Request.Method=="POST" && ctx.Request.Path=="/api/companies" && !identity.GlobalAdmin) {
         ctx.Response.StatusCode=403;await ctx.Response.WriteAsJsonAsync(new{error="Somente o administrador geral pode criar empresas."});return;
+    }
+    if(ctx.Request.Path=="/api/users" && !identity.GlobalAdmin) {
+        ctx.Response.StatusCode=403;await ctx.Response.WriteAsJsonAsync(new{error="Somente o administrador geral pode consultar todos os acessos."});return;
+    }
+    if(match.Success && Regex.IsMatch(ctx.Request.Path.Value??"",@"^/api/companies/\d+/users(?:/|$)") &&
+       int.TryParse(match.Groups[1].Value,out var accessCompanyId) && !db.CanManageCompanyAccess(identity,accessCompanyId)) {
+        ctx.Response.StatusCode=403;await ctx.Response.WriteAsJsonAsync(new{error="Este perfil não possui acesso à administração da empresa."});return;
     }
     await next();
 });
@@ -66,7 +74,7 @@ app.MapGet("/api/users", (HttpContext context, Ledger db) => db.AllUsers(Current
 app.MapGet("/api/companies", (HttpContext context, Ledger db) => db.Companies(context.Items["user"] as AuthIdentity));
 app.MapGet("/api/cnpj/{cnpj}", async (string cnpj) => await LookupCnpj(cnpj));
 app.MapPost("/api/companies", (CompanyInput x, Ledger db) => db.CreateCompany(x));
-app.MapGet("/api/companies/{companyId:int}/state", (int companyId, Ledger db) => db.State(companyId));
+app.MapGet("/api/companies/{companyId:int}/state", (int companyId, HttpContext context, Ledger db) => db.State(companyId,context.Items["user"] as AuthIdentity));
 app.MapGet("/api/companies/{companyId:int}/users", (int companyId,HttpContext context,Ledger db) => db.CompanyUsers(companyId,CurrentUser(context)));
 app.MapPost("/api/companies/{companyId:int}/users", (int companyId,UserAccessInput x,HttpContext context,Ledger db) => db.CreateCompanyUser(companyId,x,CurrentUser(context)));
 app.MapPost("/api/companies/{companyId:int}/users/{userId:int}/link", (int companyId,int userId,LinkUserInput x,HttpContext context,Ledger db) => db.LinkCompanyUser(companyId,userId,x,CurrentUser(context)));
@@ -292,6 +300,7 @@ sealed class Ledger {
     public AuthIdentity Authenticate(LoginInput x){lock(gate){using var c=Open();var username=Username(x.Username);var rows=Query(c,"SELECT * FROM users WHERE username=@p0",username);if(rows.Count==0)throw new ArgumentException("Usuário ou PIN inválido.");var row=rows[0];if(Number(row,"active")==0)throw new ArgumentException("Este acesso está bloqueado.");if(DateTime.TryParse((string)row["lockedUntil"]!,CultureInfo.InvariantCulture,DateTimeStyles.RoundtripKind,out var locked)&&locked>DateTime.UtcNow)throw new ArgumentException("Acesso temporariamente bloqueado. Aguarde alguns minutos.");if(!CheckPin(x.Pin,(string)row["pinSalt"]!,(string)row["pinHash"]!)){var attempts=Convert.ToInt32(Number(row,"failedAttempts"))+1;var until=attempts>=5?DateTime.UtcNow.AddMinutes(5).ToString("O"):"";Run(c,"UPDATE users SET failedAttempts=@p0,lockedUntil=@p1 WHERE id=@p2",attempts>=5?0:attempts,until,row["id"]);throw new ArgumentException(attempts>=5?"Muitas tentativas. O acesso foi bloqueado por cinco minutos.":"Usuário ou PIN inválido.");}Run(c,"UPDATE users SET failedAttempts=0,lockedUntil='' WHERE id=@p0",row["id"]);Run(c,"INSERT INTO access_audit(actorUserId,action,detail) VALUES(@p0,'LOGIN',@p1)",row["id"],JsonSerializer.Serialize(new{usuario=username}));return Identity(row);}}
     public AuthIdentity? SessionUser(int id){lock(gate){using var c=Open();var rows=Query(c,"SELECT * FROM users WHERE id=@p0 AND active=1",id);return rows.Count==0?null:Identity(rows[0]);}}
     public bool CanAccessCompany(int userId,int companyId){lock(gate){using var c=Open();return Query(c,"SELECT id FROM users WHERE id=@p0 AND active=1 AND globalAdmin=1",userId).Count>0||Query(c,"SELECT userId FROM user_companies WHERE userId=@p0 AND companyId=@p1 AND active=1",userId,companyId).Count>0;}}
+    public bool CanManageCompanyAccess(AuthIdentity actor,int companyId){lock(gate){if(actor.GlobalAdmin)return true;using var c=Open();return Query(c,"SELECT userId FROM user_companies WHERE userId=@p0 AND companyId=@p1 AND role='admin' AND active=1",actor.Id,companyId).Count>0;}}
     public object Companies(AuthIdentity? user){lock(gate){using var c=Open();if(user is null||user.GlobalAdmin)return Query(c,"SELECT id,name,cnpj,'global' AS role FROM companies ORDER BY name");return Query(c,"SELECT c.id,c.name,c.cnpj,uc.role FROM companies c JOIN user_companies uc ON uc.companyId=c.id WHERE uc.userId=@p0 AND uc.active=1 ORDER BY c.name",user.Id);}}
     public object AccessContext(int userId){lock(gate){using var c=Open();var rows=Query(c,"SELECT * FROM users WHERE id=@p0 AND active=1",userId);if(rows.Count==0)throw new ArgumentException("Acesso não encontrado.");var user=Identity(rows[0]);var companies=user.GlobalAdmin?Query(c,"SELECT id,name,cnpj,'global' AS role FROM companies ORDER BY name"):Query(c,"SELECT c.id,c.name,c.cnpj,uc.role FROM companies c JOIN user_companies uc ON uc.companyId=c.id WHERE uc.userId=@p0 AND uc.active=1 ORDER BY c.name",userId);return new{id=user.Id,name=user.Name,username=user.Username,globalAdmin=user.GlobalAdmin,companies};}}
     public object AllUsers(AuthIdentity actor){lock(gate){if(!actor.GlobalAdmin)throw new ArgumentException("Somente o administrador geral pode consultar todos os acessos.");using var c=Open();return Query(c,"SELECT id,name,username,globalAdmin,active FROM users ORDER BY name");}}
@@ -321,14 +330,17 @@ sealed class Ledger {
         t.amount-COALESCE((SELECT SUM(s.principal) FROM settlements s WHERE s.titleId=t.id AND s.reversed=0),0) AS remaining
         FROM titles t LEFT JOIN parties p ON p.id=t.partyId WHERE t.companyId=@p0 AND t.deleted=0 ORDER BY t.due,t.id
         """;
-    public object State(int company) { lock(gate){using var c=Open();Company(c,company);return new {
+    public object State(int company,AuthIdentity? actor=null) { lock(gate){using var c=Open();Company(c,company);
+        var financialUser=actor is not null&&!actor.GlobalAdmin&&Query(c,"SELECT role FROM user_companies WHERE userId=@p0 AND companyId=@p1 AND active=1",actor.Id,company).Any(row=>string.Equals(row["role"] as string,"user",StringComparison.Ordinal));
+        return new {
         titles=Query(c,TitlesSql,company),
         parties=Query(c,"SELECT * FROM parties WHERE companyId=@p0 ORDER BY name",company),
         accounts=Query(c,"SELECT a.*,a.opening+COALESCE((SELECT SUM(m.amount) FROM movements m WHERE m.accountId=a.id),0) AS balance FROM accounts a WHERE a.companyId=@p0 ORDER BY a.name",company),
         plans=Query(c,"SELECT * FROM plans WHERE companyId=@p0 ORDER BY name",company),
         settlements=Query(c,"SELECT s.*,a.name AS accountName FROM settlements s JOIN accounts a ON a.id=s.accountId WHERE s.companyId=@p0 ORDER BY s.id DESC",company),
-        movements=Query(c,"SELECT m.*,a.name AS accountName FROM movements m JOIN accounts a ON a.id=m.accountId WHERE m.companyId=@p0 ORDER BY m.date DESC,m.id DESC",company),
-        audit=Query(c,"SELECT * FROM audit WHERE companyId=@p0 ORDER BY id DESC LIMIT 100",company)
+        movements=financialUser?[]:Query(c,"SELECT m.*,a.name AS accountName FROM movements m JOIN accounts a ON a.id=m.accountId WHERE m.companyId=@p0 ORDER BY m.date DESC,m.id DESC",company),
+        audit=financialUser?[]:Query(c,"SELECT * FROM audit WHERE companyId=@p0 ORDER BY id DESC LIMIT 100",company),
+        permissions=new {role=financialUser?"financial":"administrator",canViewCashFlow=!financialUser,canViewHistory=!financialUser,canManageAccess=!financialUser}
     };} }
     public PdfReport FinancialReport(int company,string startValue,string endValue) { lock(gate){using var c=Open();Company(c,company);
         var start=Date(startValue);var selectedEnd=Date(endValue);if(selectedEnd<start)throw new ArgumentException("A data final não pode ser anterior à data inicial.");

@@ -165,6 +165,17 @@ class _WorkspaceState extends State<Workspace> {
     Icons.admin_panel_settings_outlined,
   ];
   bool get globalAdmin => widget.user['globalAdmin'] == true;
+  String roleForCompany(int companyId) {
+    if (globalAdmin) return 'global';
+    for (final item in companies) {
+      if (item['id'] == companyId) return '${item['role']}';
+    }
+    return 'user';
+  }
+
+  bool get financialUser => roleForCompany(company) == 'user';
+  bool pageAllowed(int index) =>
+      !financialUser || (index != 3 && index != 5 && index != 7);
   bool get canManageAccess {
     if (globalAdmin) return true;
     return companies.any(
@@ -201,6 +212,7 @@ class _WorkspaceState extends State<Workspace> {
       setState(() {
         companies = cs;
         company = selected;
+        if (roleForCompany(selected) == 'user' && !pageAllowed(page)) page = 0;
         titles = rows(data['titles']);
         parties = rows(data['parties']);
         accounts = rows(data['accounts']);
@@ -302,7 +314,7 @@ class _WorkspaceState extends State<Workspace> {
                       ),
                     ),
                     for (int i = 0; i < labels.length; i++)
-                      if (i != 7 || canManageAccess)
+                      if (pageAllowed(i) && (i != 7 || canManageAccess))
                         Padding(
                           padding: const EdgeInsets.symmetric(
                             horizontal: 12,
@@ -440,7 +452,13 @@ class _WorkspaceState extends State<Workspace> {
                                     ? null
                                     : (v) {
                                         if (v != null) {
-                                          setState(() => company = v);
+                                          setState(() {
+                                            company = v;
+                                            if (roleForCompany(v) == 'user' &&
+                                                !pageAllowed(page)) {
+                                              page = 0;
+                                            }
+                                          });
                                           load().then((_) {
                                             if (page == 7) loadAdminData();
                                           });
@@ -509,7 +527,11 @@ class _WorkspaceState extends State<Workspace> {
                             PopupMenuItem<String>(
                               enabled: false,
                               child: Text(
-                                '${widget.user['name']}\n${globalAdmin ? 'ADMINISTRADOR GERAL' : 'ACESSO DA EMPRESA'}',
+                                '${widget.user['name']}\n${globalAdmin
+                                    ? 'ADMINISTRADOR GERAL'
+                                    : financialUser
+                                    ? 'USUÁRIO FINANCEIRO'
+                                    : 'ADMINISTRADOR DA EMPRESA'}',
                               ),
                             ),
                             const PopupMenuDivider(),
@@ -688,11 +710,13 @@ class _WorkspaceState extends State<Workspace> {
                                 const SizedBox(height: 25),
                                 if (page == 0) ...dashboard(),
                                 if (page == 1 || page == 2) ...titlePage(),
-                                if (page == 3) ...cashPage(),
+                                if (page == 3 && !financialUser) ...cashPage(),
                                 if (page == 4) ...registryPage(),
-                                if (page == 5) ...historyPage(),
+                                if (page == 5 && !financialUser)
+                                  ...historyPage(),
                                 if (page == 6) ...reportsPage(),
-                                if (page == 7) ...adminPage(),
+                                if (page == 7 && canManageAccess)
+                                  ...adminPage(),
                                 const SizedBox(height: 25),
                                 Text(
                                   'MONALISA SISTEMAS  /  Financeiro local • versão inicial',
@@ -1608,7 +1632,9 @@ class _WorkspaceState extends State<Workspace> {
                       ),
                       const SizedBox(height: 12),
                       Text(
-                        '${open.length} compromissos em aberto • operação financeira do supermercado',
+                        financialUser
+                            ? 'CONTAS A PAGAR E LANÇAMENTOS DA FILIAL EM UM SÓ LUGAR'
+                            : '${open.length} compromissos em aberto • operação financeira do supermercado',
                         style: TextStyle(
                           fontSize: 12,
                           color: darkMode
@@ -1651,13 +1677,14 @@ class _WorkspaceState extends State<Workspace> {
           const Color(0xFFC16A28),
           '${payableToday.length} conta(s) com vencimento hoje',
         ),
-        metric(
-          'A receber hoje',
-          total(receivableToday, 'remaining'),
-          Icons.south_west,
-          const Color(0xFF267458),
-          '${receivableToday.length} conta(s) com vencimento hoje',
-        ),
+        if (!financialUser)
+          metric(
+            'A receber hoje',
+            total(receivableToday, 'remaining'),
+            Icons.south_west,
+            const Color(0xFF267458),
+            '${receivableToday.length} conta(s) com vencimento hoje',
+          ),
       ]),
       const SizedBox(height: 12),
       metricGroup([
@@ -1668,13 +1695,14 @@ class _WorkspaceState extends State<Workspace> {
           const Color(0xFFC16A28),
           '${payableMonth.length} conta(s) de 01/${now.month.toString().padLeft(2, '0')} até o último dia do mês',
         ),
-        metric(
-          'A receber neste mês',
-          total(receivableMonth, 'remaining'),
-          Icons.event_available_outlined,
-          const Color(0xFF267458),
-          '${receivableMonth.length} conta(s) de 01/${now.month.toString().padLeft(2, '0')} até o último dia do mês',
-        ),
+        if (!financialUser)
+          metric(
+            'A receber neste mês',
+            total(receivableMonth, 'remaining'),
+            Icons.event_available_outlined,
+            const Color(0xFF267458),
+            '${receivableMonth.length} conta(s) de 01/${now.month.toString().padLeft(2, '0')} até o último dia do mês',
+          ),
       ]),
       const SizedBox(height: 22),
       panel(
@@ -1700,47 +1728,49 @@ class _WorkspaceState extends State<Workspace> {
           ),
         ),
       ),
-      const SizedBox(height: 22),
-      panel(
-        'Resultado das baixas do mês',
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(
-              'Mostra somente o dinheiro que realmente entrou e saiu entre 01/${now.month.toString().padLeft(2, '0')} e o último dia do mês.',
-              style: TextStyle(fontSize: 12, color: mutedText),
-            ),
-            const SizedBox(height: 16),
-            metricGroup([
-              metric(
-                'Recebido no mês',
-                receivedThisMonth,
-                Icons.arrow_downward_rounded,
-                const Color(0xFF267458),
-                'Soma das baixas em contas a receber',
+      if (!financialUser) ...[
+        const SizedBox(height: 22),
+        panel(
+          'Resultado das baixas do mês',
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                'Mostra somente o dinheiro que realmente entrou e saiu entre 01/${now.month.toString().padLeft(2, '0')} e o último dia do mês.',
+                style: TextStyle(fontSize: 12, color: mutedText),
               ),
-              metric(
-                'Pago no mês',
-                paidThisMonth,
-                Icons.arrow_upward_rounded,
-                const Color(0xFFC16A28),
-                'Soma das baixas em contas a pagar',
-              ),
-              metric(
-                'Resultado do mês',
-                monthlyResult,
-                monthlyResult < 0
-                    ? Icons.trending_down_rounded
-                    : Icons.trending_up_rounded,
-                monthlyResult < 0
-                    ? const Color(0xFFB23A3A)
-                    : const Color(0xFF267458),
-                'Recebido menos pago',
-              ),
-            ]),
-          ],
+              const SizedBox(height: 16),
+              metricGroup([
+                metric(
+                  'Recebido no mês',
+                  receivedThisMonth,
+                  Icons.arrow_downward_rounded,
+                  const Color(0xFF267458),
+                  'Soma das baixas em contas a receber',
+                ),
+                metric(
+                  'Pago no mês',
+                  paidThisMonth,
+                  Icons.arrow_upward_rounded,
+                  const Color(0xFFC16A28),
+                  'Soma das baixas em contas a pagar',
+                ),
+                metric(
+                  'Resultado do mês',
+                  monthlyResult,
+                  monthlyResult < 0
+                      ? Icons.trending_down_rounded
+                      : Icons.trending_up_rounded,
+                  monthlyResult < 0
+                      ? const Color(0xFFB23A3A)
+                      : const Color(0xFF267458),
+                  'Recebido menos pago',
+                ),
+              ]),
+            ],
+          ),
         ),
-      ),
+      ],
     ];
   }
 
