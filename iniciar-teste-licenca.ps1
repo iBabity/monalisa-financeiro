@@ -38,4 +38,3 @@ if (-not $ready) {
 }
 if (-not $ready) { throw 'Não foi possível abrir o ambiente de teste da licença.' }
 if (-not $SemNavegador) { Start-Process "$url/?v=license-test" }
-
