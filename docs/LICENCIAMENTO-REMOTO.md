@@ -25,7 +25,7 @@ Uma chave já vinculada não ativa outra máquina. Para uma troca de computador,
 - **Somente consulta:** permite visualizar dados e gerar backup, mas recusa cadastros, lançamentos, baixas, edições e exclusões.
 - **Bloqueada:** impede o uso comum e mostra a mensagem definida pela Monalisa.
 
-O acesso mestre diário continua funcionando quando a licença está bloqueada, permitindo atendimento e recuperação. O bloqueio nunca exclui ou altera o banco financeiro do cliente.
+O acesso mestre diário existe somente no Painel Central. O Financeiro não aceita a senha mestra e não permite ignorar o bloqueio. O bloqueio nunca exclui ou altera o banco financeiro do cliente; a liberação é feita remotamente no Painel Central.
 
 ## Falta de internet
 
@@ -42,6 +42,6 @@ O Painel Central deve ser publicado em um servidor HTTPS. O instalador Release d
 Arquivos que exigem guarda segura e não fazem parte do Git ou do instalador:
 
 - `.private-license/license-signing-private.pem`
-- `.private-support/master.key`
+- `.private-support/master.key` (senha diária exclusiva do Painel Central)
 
 Sem a primeira chave não é possível assinar novas validações de licença. Sem a segunda não é possível gerar as senhas mestras diárias existentes.

@@ -33,8 +33,6 @@ class _AccessGateState extends State<AccessGate> {
   bool loading = true;
   bool busy = false;
   bool needsSetup = false;
-  bool masterMode = false;
-  bool licenseBypass = false;
   bool hidePin = true;
   bool darkMode = false;
   double fontScale = 1;
@@ -44,7 +42,7 @@ class _AccessGateState extends State<AccessGate> {
   List<RecordData> companies = [];
   int? selectedCompany;
 
-  bool get creatingAdministrator => needsSetup && !masterMode;
+  bool get creatingAdministrator => needsSetup;
 
   @override
   void initState() {
@@ -70,9 +68,8 @@ class _AccessGateState extends State<AccessGate> {
       );
       if (mounted) license = licenseResult;
       final licenseStatus = '${licenseResult['status']}';
-      if (!licenseBypass &&
-          (licenseStatus == 'activation_required' ||
-              licenseStatus == 'blocked')) {
+      if (licenseStatus == 'activation_required' ||
+          licenseStatus == 'blocked') {
         if (mounted) setState(() => loading = false);
         return;
       }
@@ -123,18 +120,6 @@ class _AccessGateState extends State<AccessGate> {
         });
       }
     }
-  }
-
-  Future<void> openMasterAccess() async {
-    setState(() {
-      licenseBypass = true;
-      masterMode = true;
-      needsSetup = false;
-      username.text = 'ADMIN';
-      pin.clear();
-      error = null;
-      loading = false;
-    });
   }
 
   String cleanError(Object value) =>
@@ -209,7 +194,6 @@ class _AccessGateState extends State<AccessGate> {
       selectedCompany = null;
       error = null;
       needsSetup = false;
-      masterMode = false;
       username.clear();
       pin.clear();
     });
@@ -220,9 +204,8 @@ class _AccessGateState extends State<AccessGate> {
     if (loading) {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
-    if (!licenseBypass &&
-        (license['status'] == 'activation_required' ||
-            license['status'] == 'blocked')) {
+    if (license['status'] == 'activation_required' ||
+        license['status'] == 'blocked') {
       return licenseScreen();
     }
     if (user != null && selectedCompany != null) {
@@ -342,11 +325,6 @@ class _AccessGateState extends State<AccessGate> {
                             },
                       icon: const Icon(Icons.refresh),
                       label: const Text('VERIFICAR NOVAMENTE'),
-                    ),
-                    TextButton.icon(
-                      onPressed: busy ? null : openMasterAccess,
-                      icon: const Icon(Icons.admin_panel_settings_outlined),
-                      label: const Text('ACESSO MESTRE MONALISA'),
                     ),
                   ],
                 ),
@@ -472,9 +450,7 @@ class _AccessGateState extends State<AccessGate> {
                               const SizedBox(height: 8),
                               Text(
                                 creatingAdministrator
-                                    ? 'ESTE SERÁ O ACESSO RESPONSÁVEL POR TODAS AS EMPRESAS E LOJAS.'
-                                    : masterMode
-                                    ? 'USE ADMIN E A SENHA MESTRA VÁLIDA PARA HOJE.'
+                                    ? 'ESTE SERÁ O ACESSO RESPONSÁVEL POR TODAS AS EMPRESAS E LOJAS DESTA INSTALAÇÃO.'
                                     : 'USE SEU USUÁRIO E PIN PESSOAL.',
                                 textAlign: TextAlign.center,
                                 style: TextStyle(
@@ -582,32 +558,6 @@ class _AccessGateState extends State<AccessGate> {
                                       : 'ENTRAR',
                                 ),
                               ),
-                              if (needsSetup) ...[
-                                const SizedBox(height: 8),
-                                TextButton.icon(
-                                  onPressed: busy
-                                      ? null
-                                      : () => setState(() {
-                                          masterMode = !masterMode;
-                                          error = null;
-                                          username.text = masterMode
-                                              ? 'ADMIN'
-                                              : '';
-                                          pin.clear();
-                                          confirmPin.clear();
-                                        }),
-                                  icon: Icon(
-                                    masterMode
-                                        ? Icons.person_add_alt_1_outlined
-                                        : Icons.admin_panel_settings_outlined,
-                                  ),
-                                  label: Text(
-                                    masterMode
-                                        ? 'CRIAR ADMINISTRADOR DESTA INSTALAÇÃO'
-                                        : 'ENTRAR COM ACESSO MESTRE',
-                                  ),
-                                ),
-                              ],
                               const SizedBox(height: 16),
                               Text(
                                 'DADOS SALVOS NESTA MÁQUINA • ACESSO LOCAL',

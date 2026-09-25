@@ -13,8 +13,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Content Remove="master-access-codes.json" />
-    <EmbeddedResource Include="master-access-codes.json" />
     <EmbeddedResource Include="license-public.pem" />
   </ItemGroup>
 

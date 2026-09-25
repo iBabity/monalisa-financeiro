@@ -11,7 +11,7 @@ O banco fica em `data/financeiro.db`. A empresa inicial é "Empresa de teste", c
 
 No primeiro uso, a tela solicita a criação do administrador geral. O administrador geral enxerga todas as lojas, cria empresas e cria o administrador de cada empresa. Pessoas vinculadas a mais de um CNPJ escolhem a empresa depois do login.
 
-Todas as instalações também aceitam o usuário reservado `ADMIN` com uma senha mestra de dez números que muda diariamente e perde a validade à meia-noite. O acesso mestre não cria um usuário permanente no banco, recebe perfil de administrador geral e é bloqueado por cinco minutos após cinco erros. O instalador leva somente a tabela de verificação; a chave que gera as senhas fica em `.private-support/master.key`, fora do Git e fora do instalador. A equipe autorizada consulta a senha do dia com `support/GerarSenhaMestra.ps1`.
+O usuário reservado `ADMIN` e a senha mestra diária funcionam somente no Painel Central Monalisa. O Financeiro instalado não possui acesso mestre nem permite ignorar um bloqueio remoto. Nele entram apenas os usuários cadastrados naquela instalação.
 
 ## Implementado
 
