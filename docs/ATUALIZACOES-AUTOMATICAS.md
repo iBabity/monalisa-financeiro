@@ -20,12 +20,20 @@
 ## Publicação
 
 1. Gere o instalador da nova versão.
-2. Entre no Painel Central.
-3. Em **Versões do Monalisa Financeiro**, informe a versão com três números.
-4. Selecione o instalador EXE, descreva a alteração e publique.
-5. Confira no painel a versão publicada, o tamanho e a data.
+2. Execute `support\PublicarAtualizacaoGitHub.ps1` com versão, instalador e
+   descrição.
+3. O script cria ou atualiza a Release no repositório público
+   `iBabity/monalisa-financeiro-updates` e publica o `manifest.json`.
+4. Publique também no Painel Central para manter o caminho alternativo durante
+   a transição das instalações antigas.
+5. Confira a Release, o tamanho e o SHA-256 antes de liberar a versão.
 
-Toda versão publicada é obrigatória. A máquina compara sua versão ao abrir o Financeiro. Quando existe uma versão superior, ela baixa o instalador, confirma o SHA-256 e solicita a permissão do Windows para atualizar. O programa volta a abrir depois da instalação.
+O repositório `monalisa-financeiro` permanece privado. O repositório público
+contém somente o manifesto e os instaladores. Toda versão publicada é
+obrigatória. A máquina consulta primeiro o manifesto público do GitHub e usa o
+Painel Central como alternativa. Quando existe uma versão superior, ela baixa
+o instalador, confirma o SHA-256 e solicita a permissão do Windows para
+atualizar. O programa volta a abrir depois da instalação.
 
 ## Proteção dos dados
 
@@ -37,7 +45,12 @@ Os dados e a ativação permanecem em `C:\ProgramData\Monalisa Financeiro`; some
 
 ## Comportamento sem conexão
 
-Se o Painel Central estiver temporariamente indisponível e a máquina ainda não tiver recebido a informação da nova versão, o Financeiro continua seguindo a tolerância offline da licença. Depois que uma atualização obrigatória é encontrada, falha no download ou recusa da permissão do Windows impede a abertura até uma nova tentativa.
+Se o GitHub estiver temporariamente indisponível, o Financeiro consulta o
+Painel Central. Se ambos estiverem indisponíveis e a máquina ainda não tiver
+recebido a informação da nova versão, o Financeiro continua seguindo a
+tolerância offline da licença. Depois que uma atualização obrigatória é
+encontrada, falha no download ou recusa da permissão do Windows impede a
+abertura até uma nova tentativa.
 
 ## Teste local
 
