@@ -14,7 +14,8 @@ record MonthlyReportLine(
     long Principal = 0,
     long Interest = 0,
     long Penalty = 0,
-    long Discount = 0);
+    long Discount = 0,
+    long Additional = 0);
 
 record MonthlyReportData(
     string Company,
@@ -164,7 +165,7 @@ static class MonthlyReportPdf
             table.Header(header =>
             {
                 HeaderCell(header, "DATA"); HeaderCell(header, "TIPO"); HeaderCell(header, "DESCRIÇÃO"); HeaderCell(header, "CONTA");
-                HeaderCell(header, "PRINCIPAL", true); HeaderCell(header, "JUROS / MULTA", true); HeaderCell(header, "DESCONTO", true); HeaderCell(header, "TOTAL", true);
+                HeaderCell(header, "PRINCIPAL", true); HeaderCell(header, "ACRÉSCIMOS", true); HeaderCell(header, "DESCONTO", true); HeaderCell(header, "TOTAL", true);
             });
             foreach (var line in lines)
             {
@@ -173,7 +174,7 @@ static class MonthlyReportPdf
                 BodyCell(table, line.Description);
                 BodyCell(table, line.Detail);
                 BodyCell(table, Money(line.Principal), true);
-                BodyCell(table, Money(line.Interest + line.Penalty), true, line.Interest + line.Penalty > 0 ? Orange : null);
+                BodyCell(table, Money(line.Interest + line.Penalty + line.Additional), true, line.Interest + line.Penalty + line.Additional > 0 ? Orange : null);
                 BodyCell(table, Money(line.Discount), true, line.Discount > 0 ? "#267458" : null);
                 BodyCell(table, Money(line.Amount), true, line.Type == "RECEBIMENTO" ? Teal : Orange);
             }

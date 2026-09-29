@@ -17,6 +17,7 @@ record PayableReportRow(
     long Interest,
     long Penalty,
     long Discount,
+    long Additional,
     long TotalPaid,
     string Status);
 
@@ -113,7 +114,7 @@ static class PayableReportsPdf
         row.ConstantItem(7);
         TotalCard(row.RelativeItem(), data.Direction == "receivable" ? "PRINCIPAL RECEBIDO" : "PRINCIPAL PAGO", rows.Sum(item => item.PaidPrincipal), Teal);
         row.ConstantItem(7);
-        TotalCard(row.RelativeItem(), "JUROS + MULTA", rows.Sum(item => item.Interest + item.Penalty), Orange);
+        TotalCard(row.RelativeItem(), "JUROS + MULTA + ACRÉSC.", rows.Sum(item => item.Interest + item.Penalty + item.Additional), Orange);
         row.ConstantItem(7);
         TotalCard(row.RelativeItem(), "DESCONTOS", rows.Sum(item => item.Discount), "#267458");
         row.ConstantItem(7);
@@ -136,14 +137,14 @@ static class PayableReportsPdf
             columns.ConstantColumn(45); columns.ConstantColumn(45);
             columns.RelativeColumn(1.25f); columns.ConstantColumn(47); columns.RelativeColumn(1.35f); columns.RelativeColumn(1.05f);
             columns.ConstantColumn(55); columns.ConstantColumn(55); columns.ConstantColumn(44);
-            columns.ConstantColumn(44); columns.ConstantColumn(44); columns.ConstantColumn(55);
+            columns.ConstantColumn(44); columns.ConstantColumn(44); columns.ConstantColumn(44); columns.ConstantColumn(55);
             columns.ConstantColumn(55); columns.ConstantColumn(45);
         });
         table.Header(header =>
         {
             Header(header, "VENC."); Header(header, direction == "receivable" ? "REC." : "PAG."); Header(header, direction == "receivable" ? "CLIENTE / ORIGEM" : "FORNECEDOR"); Header(header, "DOC."); Header(header, "DESCRIÇÃO"); Header(header, "PLANO");
             Header(header, "PARCELA", true); Header(header, "PRINCIPAL", true); Header(header, "JUROS", true); Header(header, "MULTA", true);
-            Header(header, "DESC.", true); Header(header, "RESTANTE", true); Header(header, direction == "receivable" ? "TOTAL REC." : "TOTAL PAGO", true); Header(header, "SITUAÇÃO");
+            Header(header, "DESC.", true); Header(header, "ACRÉSC.", true); Header(header, "RESTANTE", true); Header(header, direction == "receivable" ? "TOTAL REC." : "TOTAL PAGO", true); Header(header, "SITUAÇÃO");
         });
         foreach (var item in rows)
         {
@@ -153,6 +154,7 @@ static class PayableReportsPdf
             Cell(table, Money(item.Interest), true, item.Interest > 0 ? Orange : null);
             Cell(table, Money(item.Penalty), true, item.Penalty > 0 ? Orange : null);
             Cell(table, Money(item.Discount), true, item.Discount > 0 ? "#267458" : null);
+            Cell(table, Money(item.Additional), true, item.Additional > 0 ? Orange : null);
             Cell(table, Money(item.Remaining), true, item.Remaining > 0 ? Orange : Teal);
             Cell(table, Money(item.TotalPaid), true, Teal); Cell(table, item.Status);
         }

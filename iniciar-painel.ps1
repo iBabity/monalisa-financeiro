@@ -1,8 +1,9 @@
+param([switch]$NoBrowser)
 $ErrorActionPreference='Stop'
 $root=$PSScriptRoot
 $project=Join-Path $root 'license-server'
 $dll=Join-Path $project 'bin\Debug\net10.0\Monalisa.Licensing.dll'
-$env:MONALISA_LICENSE_BIND='http://127.0.0.1:5200'
+$env:MONALISA_LICENSE_BIND='http://0.0.0.0:5200'
 $env:MONALISA_LICENSE_DB=Join-Path $project 'data\licenses.db'
 $env:MONALISA_LICENSE_PRIVATE_KEY=Join-Path $root '.private-license\license-signing-private.pem'
 if(-not (Test-Path -LiteralPath $dll)){
@@ -17,4 +18,4 @@ if(-not $ready){
     for($i=0;$i -lt 40;$i++){try{$ready=(Invoke-RestMethod 'http://127.0.0.1:5200/api/health').status -eq 'ok';if($ready){break}}catch{};Start-Sleep -Milliseconds 300}
 }
 if(-not $ready){throw 'Não foi possível iniciar o Painel Central. Consulte a pasta logs.'}
-Start-Process 'http://127.0.0.1:5200'
+if(-not $NoBrowser){Start-Process 'http://127.0.0.1:5200'}

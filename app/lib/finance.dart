@@ -35,6 +35,37 @@ int parseMoney(String text) {
 
 String inputMoney(num cents) =>
     (cents / 100).toStringAsFixed(2).replaceAll('.', ',');
+
+List<int> scheduledAmounts(int amount, int count, {bool repeatEach = false}) {
+  if (count < 1) throw const FormatException('Quantidade inválida.');
+  if (repeatEach) return List<int>.filled(count, amount);
+  return List<int>.generate(
+    count,
+    (i) => amount ~/ count + (i < amount % count ? 1 : 0),
+  );
+}
+
+List<String> scheduledDues(String firstDue, int count, {int intervalDays = 0}) {
+  if (count < 1 || intervalDays < 0 || intervalDays > 365) {
+    throw const FormatException('Configuração de repetição inválida.');
+  }
+  final first = DateTime.parse(firstDue);
+  return List<String>.generate(count, (i) {
+    if (intervalDays > 0) {
+      return iso(first.add(Duration(days: i * intervalDays)));
+    }
+    final month = DateTime(first.year, first.month + i, 1);
+    final lastDay = DateTime(month.year, month.month + 1, 0).day;
+    return iso(
+      DateTime(
+        month.year,
+        month.month,
+        first.day > lastDay ? lastDay : first.day,
+      ),
+    );
+  });
+}
+
 String status(RecordData t) {
   if (t['cancelled'] == 1) return 'Cancelado';
   if (t['remaining'] == 0) return 'Pago';
@@ -78,18 +109,26 @@ String historyText(
         return 'Conta "${d['Name']}" cadastrada com saldo inicial de ${money(d['Opening'])}.';
       case 'Lançamento':
         final count = d['Installments'] as int? ?? 1;
-        return '${d['Kind'] == 'payable' ? 'Conta a pagar' : 'Conta a receber'} "${d['Description']}" criada no valor ${count > 1 ? 'total ' : ''}de ${money(d['Amount'])}. ${count > 1 ? '$count parcelas mensais, com primeiro vencimento' : 'Vencimento'} em ${dateLabel(d['Due'])}.';
+        final weekly = (d['InstallmentIntervalDays'] as int? ?? 0) == 7;
+        return '${d['Kind'] == 'payable' ? 'Conta a pagar' : 'Conta a receber'} "${d['Description']}" criada no valor ${count > 1 ? 'total ' : ''}de ${money(d['Amount'])}. ${count > 1
+            ? weekly
+                  ? '$count lançamentos a cada 7 dias, com primeiro vencimento'
+                  : '$count parcelas mensais, com primeiro vencimento'
+            : 'Vencimento'} em ${dateLabel(d['Due'])}.';
       case 'Baixa':
         final input = Map<String, dynamic>.from(d['input']);
         final payable = find(titles, d['titleId'])?['kind'] == 'payable';
         final cash =
             input['Principal'] +
             input['Interest'] +
-            input['Penalty'] -
+            input['Penalty'] +
+            (input['Additional'] ?? 0) -
             input['Discount'];
         final adjustments = <String>[
           if (input['Interest'] > 0) 'juros de ${money(input['Interest'])}',
           if (input['Penalty'] > 0) 'multa de ${money(input['Penalty'])}',
+          if ((input['Additional'] ?? 0) > 0)
+            'outros acréscimos de ${money(input['Additional'])}',
           if (input['Discount'] > 0) 'desconto de ${money(input['Discount'])}',
         ];
         return '${payable ? 'Pagamento' : 'Recebimento'} de ${money(cash)} registrado para "${title(d['titleId'])}" em ${dateLabel(input['Date'])}, na conta "${account(input['AccountId'])}". Valor do título liquidado: ${money(input['Principal'])}.${adjustments.isEmpty ? '' : ' Ajustes: ${adjustments.join(', ')}.'}';
@@ -107,6 +146,16 @@ String historyText(
         return 'O lançamento "${d['description']}" foi excluído da lista. Motivo: ${d['reason']}';
       case 'Transferência':
         return '${money(d['Amount'])} transferidos da conta "${account(d['FromId'])}" para "${account(d['ToId'])}" em ${dateLabel(d['Date'])}.';
+      case 'Ajuste de saldo':
+        return 'Ajuste de ${money(d['Amount'])} na conta "${account(d['accountId'])}" em ${dateLabel(d['date'])}. Motivo: ${d['reason']}';
+      case 'Duplicação':
+        return 'O lançamento "${title(d['sourceId'])}" foi duplicado com vencimento em ${dateLabel(d['due'])}.';
+      case 'Baixa em lote':
+        return '${d['count']} títulos foram baixados em lote. Total movimentado: ${money(d['total'])}.';
+      case 'Anexo incluído':
+        return 'Arquivo "${d['name']}" anexado ao registro financeiro.';
+      case 'Restauração de backup':
+        return 'Backup "${d['arquivo']}" restaurado. Uma cópia anterior foi preservada.';
       default:
         return 'Operação registrada no sistema.';
     }

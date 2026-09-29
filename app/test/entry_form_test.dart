@@ -198,4 +198,66 @@ void main() {
     await tester.pumpAndSettle();
     expect(selected, DateTime(2026, 9, 25));
   });
+
+  testWidgets('repetição semanal mostra quantidade e total gerado', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(
+              onPressed: () => showDialog(
+                context: context,
+                builder: (_) => EntryDialog(
+                  title: 'Nova conta a pagar',
+                  fields: [
+                    FormFieldSpec(
+                      'amount',
+                      'Valor (R\$)',
+                      money: true,
+                      required: true,
+                    ),
+                    FormFieldSpec(
+                      'repeatMode',
+                      'Como deseja lançar esta despesa?',
+                      initial: 'single',
+                      options: const [
+                        MapEntry('single', 'CONTA ÚNICA'),
+                        MapEntry(
+                          'weekly',
+                          'REPETIR O MESMO VALOR A CADA 7 DIAS',
+                        ),
+                      ],
+                    ),
+                    FormFieldSpec(
+                      'installments',
+                      'Quantidade de lançamentos',
+                      initial: '1',
+                      visibleWhenKey: 'repeatMode',
+                      visibleWhenValues: const {'weekly'},
+                    ),
+                  ],
+                  save: (_) async {},
+                ),
+              ),
+              child: const Text('Abrir'),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Abrir'));
+    await tester.pumpAndSettle();
+    expect(find.text('Quantidade de lançamentos'), findsNothing);
+    await tester.tap(find.text('CONTA ÚNICA'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('REPETIR O MESMO VALOR A CADA 7 DIAS').last);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Quantidade de lançamentos'), findsOneWidget);
+    await tester.enterText(find.byType(TextFormField).first, '50');
+    await tester.enterText(find.byType(TextFormField).last, '4');
+    await tester.pump();
+    expect(find.textContaining('Total gerado: R\$ 200,00'), findsOneWidget);
+  });
 }

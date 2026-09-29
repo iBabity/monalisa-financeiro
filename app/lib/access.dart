@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 
 import 'entry_form.dart';
 import 'finance.dart';
+import 'app_version.dart';
 
 const _teal = Color(0xFF073F43);
 const _cream = Color(0xFFF7F2EA);
@@ -33,6 +34,7 @@ class _AccessGateState extends State<AccessGate> {
   bool loading = true;
   bool busy = false;
   bool needsSetup = false;
+  bool changingLicense = false;
   bool hidePin = true;
   bool darkMode = false;
   double fontScale = 1;
@@ -70,6 +72,10 @@ class _AccessGateState extends State<AccessGate> {
       final licenseStatus = '${licenseResult['status']}';
       if (licenseStatus == 'activation_required' ||
           licenseStatus == 'blocked') {
+        if (mounted) setState(() => loading = false);
+        return;
+      }
+      if (licenseResult['restartRequired'] == true) {
         if (mounted) setState(() => loading = false);
         return;
       }
@@ -112,6 +118,67 @@ class _AccessGateState extends State<AccessGate> {
         loading = true;
       });
       await checkSetup();
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          busy = false;
+          error = cleanError(e);
+        });
+      }
+    }
+  }
+
+  Future<void> changeCurrentLicense() async {
+    if (busy) return;
+    final key = activationKey.text.trim().toUpperCase();
+    if (key.isEmpty) {
+      setState(() => error = 'INFORME A NOVA CHAVE DE ATIVAÇÃO.');
+      return;
+    }
+    setState(() {
+      busy = true;
+      error = null;
+    });
+    try {
+      final changed = RecordData.from(
+        await api.request('/license/change', {'activationKey': key}),
+      );
+      activationKey.clear();
+      if (!mounted) return;
+      setState(() {
+        license = changed;
+        changingLicense = false;
+        busy = false;
+        loading = changed['restartRequired'] != true;
+      });
+      if (changed['restartRequired'] != true) await checkSetup();
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          busy = false;
+          error = cleanError(e);
+        });
+      }
+    }
+  }
+
+  Future<void> refreshLicenseAndSetup() async {
+    if (busy) return;
+    setState(() {
+      busy = true;
+      error = null;
+    });
+    try {
+      final refreshed = RecordData.from(
+        await api.request('/license/refresh', {}),
+      );
+      if (!mounted) return;
+      setState(() {
+        license = refreshed;
+        busy = false;
+        loading = refreshed['restartRequired'] != true;
+      });
+      if (refreshed['restartRequired'] != true) await checkSetup();
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -207,6 +274,11 @@ class _AccessGateState extends State<AccessGate> {
     if (license['status'] == 'activation_required' ||
         license['status'] == 'blocked') {
       return licenseScreen();
+    }
+    if (license['restartRequired'] == true) return networkRestartScreen();
+    if (license['isSecondary'] == true &&
+        license['networkConfigured'] != true) {
+      return secondaryConnectionScreen();
     }
     if (user != null && selectedCompany != null) {
       return widget.builder(api, user!, selectedCompany!, license, logout);
@@ -336,6 +408,129 @@ class _AccessGateState extends State<AccessGate> {
     );
   }
 
+  Widget networkRestartScreen() => Scaffold(
+    backgroundColor: darkMode ? const Color(0xFF111817) : _cream,
+    body: Center(
+      child: Padding(
+        padding: const EdgeInsets.all(28),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 480),
+          child: Card(
+            child: Padding(
+              padding: const EdgeInsets.all(34),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Icon(Icons.devices_outlined, size: 48, color: _teal),
+                  const SizedBox(height: 18),
+                  const Text(
+                    'SEGUNDA MÁQUINA IDENTIFICADA',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
+                  ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'A CONEXÃO COM A MÁQUINA PRINCIPAL FOI CONFIGURADA. FECHE E ABRA NOVAMENTE O FINANCEIRO PARA CARREGAR OS USUÁRIOS E OS DADOS JÁ CADASTRADOS.',
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 22),
+                  FilledButton.icon(
+                    onPressed: () => SystemNavigator.pop(),
+                    icon: const Icon(Icons.power_settings_new),
+                    label: const Text('FECHAR PARA APLICAR'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+
+  Widget secondaryConnectionScreen() => Scaffold(
+    backgroundColor: darkMode ? const Color(0xFF111817) : _cream,
+    body: Center(
+      child: Padding(
+        padding: const EdgeInsets.all(28),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 500),
+          child: Card(
+            child: Padding(
+              padding: const EdgeInsets.all(34),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Icon(Icons.lan_outlined, size: 48, color: _teal),
+                  const SizedBox(height: 18),
+                  const Text(
+                    'CONECTAR À MÁQUINA PRINCIPAL',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
+                  ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'ESTA LICENÇA PERTENCE À SEGUNDA MÁQUINA. O ADMINISTRADOR GERAL E OS DEMAIS USUÁRIOS DEVEM VIR DA MÁQUINA PRINCIPAL; NÃO SERÁ CRIADO OUTRO CADASTRO LOCAL.',
+                    textAlign: TextAlign.center,
+                  ),
+                  if (error != null) ...[
+                    const SizedBox(height: 12),
+                    Text(
+                      error!,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: Colors.redAccent),
+                    ),
+                  ],
+                  const SizedBox(height: 22),
+                  FilledButton.icon(
+                    onPressed: busy ? null : refreshLicenseAndSetup,
+                    icon: busy
+                        ? const SizedBox.square(
+                            dimension: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.sync),
+                    label: const Text('BUSCAR MÁQUINA PRINCIPAL'),
+                  ),
+                  const SizedBox(height: 10),
+                  OutlinedButton.icon(
+                    onPressed: busy
+                        ? null
+                        : () => setState(
+                            () => changingLicense = !changingLicense,
+                          ),
+                    icon: const Icon(Icons.key_outlined),
+                    label: const Text('TROCAR LICENÇA'),
+                  ),
+                  if (changingLicense) ...[
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: activationKey,
+                      textCapitalization: TextCapitalization.characters,
+                      inputFormatters: [UpperCaseTextFormatter()],
+                      decoration: const InputDecoration(
+                        labelText: 'NOVA CHAVE DE ATIVAÇÃO',
+                        prefixIcon: Icon(Icons.vpn_key),
+                      ),
+                      onSubmitted: (_) => changeCurrentLicense(),
+                    ),
+                    const SizedBox(height: 10),
+                    FilledButton(
+                      onPressed: busy ? null : changeCurrentLicense,
+                      child: const Text('CONFIRMAR NOVA LICENÇA'),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+
   Widget accessScreen() => Scaffold(
     backgroundColor: darkMode ? const Color(0xFF111817) : _cream,
     body: Stack(
@@ -460,7 +655,95 @@ class _AccessGateState extends State<AccessGate> {
                                   fontSize: 12,
                                 ),
                               ),
+                              const SizedBox(height: 6),
+                              Text(
+                                'VERSÃO $appVersion',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  color: Theme.of(context)
+                                      .colorScheme
+                                      .onSurfaceVariant,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600,
+                                  letterSpacing: .4,
+                                ),
+                              ),
                               const SizedBox(height: 26),
+                              ...[
+                                Container(
+                                  padding: const EdgeInsets.all(14),
+                                  decoration: BoxDecoration(
+                                    color: Theme.of(context)
+                                        .colorScheme
+                                        .surfaceContainerHighest
+                                        .withValues(alpha: .45),
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.stretch,
+                                    children: [
+                                      Text(
+                                        'LICENÇA ATUAL: ${license['company'] ?? 'NÃO IDENTIFICADA'}',
+                                        style: const TextStyle(
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      OutlinedButton.icon(
+                                        onPressed: busy
+                                            ? null
+                                            : () => setState(() {
+                                                changingLicense =
+                                                    !changingLicense;
+                                                error = null;
+                                              }),
+                                        icon: const Icon(Icons.key_outlined),
+                                        label: const Text(
+                                          'TROCAR LICENÇA DESTA MÁQUINA',
+                                        ),
+                                      ),
+                                      if (changingLicense) ...[
+                                        const SizedBox(height: 12),
+                                        TextField(
+                                          controller: activationKey,
+                                          textCapitalization:
+                                              TextCapitalization.characters,
+                                          inputFormatters: [
+                                            UpperCaseTextFormatter(),
+                                          ],
+                                          decoration: const InputDecoration(
+                                            labelText: 'NOVA CHAVE DE ATIVAÇÃO',
+                                            prefixIcon: Icon(Icons.vpn_key),
+                                          ),
+                                          onSubmitted: (_) =>
+                                              changeCurrentLicense(),
+                                        ),
+                                        const SizedBox(height: 10),
+                                        FilledButton.icon(
+                                          onPressed: busy
+                                              ? null
+                                              : changeCurrentLicense,
+                                          icon: const Icon(
+                                            Icons.sync_alt_outlined,
+                                          ),
+                                          label: const Text(
+                                            'CONFIRMAR NOVA LICENÇA',
+                                          ),
+                                        ),
+                                        const SizedBox(height: 6),
+                                        const Text(
+                                          'SE ESTA FOR A LICENÇA DA SEGUNDA MÁQUINA, O SISTEMA BUSCARÁ OS USUÁRIOS DA MÁQUINA PRINCIPAL.',
+                                          textAlign: TextAlign.center,
+                                          style: TextStyle(fontSize: 10),
+                                        ),
+                                      ],
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(height: 18),
+                              ],
                               if (creatingAdministrator) ...[
                                 TextField(
                                   controller: name,

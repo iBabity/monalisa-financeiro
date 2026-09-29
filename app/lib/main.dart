@@ -1,11 +1,17 @@
+import 'dart:convert';
+
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:flutter/services.dart';
 
 import 'finance.dart';
 import 'entry_form.dart';
 import 'access.dart';
+import 'browser_download.dart';
+import 'pdf_open.dart';
+import 'app_version.dart';
 
 const teal = Color(0xFF073F43);
 const orange = Color(0xFFED791B);
@@ -132,8 +138,12 @@ class _WorkspaceState extends State<Workspace> {
       movements = [],
       audit = [],
       plans = [],
+      paymentMethods = [],
+      costCenters = [],
+      attachments = [],
       companyUsers = [],
       allUsers = [];
+  RecordData permissions = {};
   late int company = widget.initialCompany;
   int page = 0, generation = 0;
   bool loading = true;
@@ -142,8 +152,13 @@ class _WorkspaceState extends State<Workspace> {
   bool darkMode = false;
   String? error;
   String search = '', filter = 'Todos';
+  String categoryFilter = '', costCenterFilter = '', sortTitles = 'due';
+  final Set<int> selectedTitleIds = {};
   String registrySearch = '';
   String historySearch = '';
+  String cashMovementSearch = '';
+  String cashMovementType = 'all';
+  String cashMovementAccount = '';
   String? historyDay = iso(DateTime.now());
   String selectedMonth = iso(DateTime.now()).substring(0, 7);
   DateTime reportStart = DateUtils.dateOnly(DateTime.now());
@@ -178,6 +193,8 @@ class _WorkspaceState extends State<Workspace> {
   }
 
   bool get financialUser => roleForCompany(company) == 'user';
+  bool get canManagePlanRates =>
+      !financialUser || permissions['canManagePlanRates'] == true;
   bool pageAllowed(int index) =>
       !financialUser || (index != 3 && index != 5 && index != 7);
   bool get canManageAccess {
@@ -185,6 +202,37 @@ class _WorkspaceState extends State<Workspace> {
     return companies.any(
       (item) => item['id'] == company && item['role'] == 'admin',
     );
+  }
+
+  List<RecordData> get relatedCompanyUnits {
+    final current = companies.where((item) => item['id'] == company).toList();
+    if (current.isEmpty) return const [];
+    final digits = '${current.first['cnpj']}'.replaceAll(RegExp(r'\D'), '');
+    if (digits.length != 14) return const [];
+    final root = digits.substring(0, 8);
+    return companies.where((item) {
+      final candidate = '${item['cnpj']}'.replaceAll(RegExp(r'\D'), '');
+      return candidate.length == 14 && candidate.substring(0, 8) == root;
+    }).toList();
+  }
+
+  bool get hasMatrixOrBranch => relatedCompanyUnits.length > 1;
+
+  String get currentCompanyName {
+    final current = companies.where((item) => item['id'] == company).toList();
+    return current.isEmpty ? '' : '${current.first['name']}';
+  }
+
+  List<MapEntry<String, String>> branchOptions([String? existing]) {
+    final values = <String, String>{};
+    for (final item in relatedCompanyUnits) {
+      final name = '${item['name']}';
+      values[name] = '$name • ${maskedDocument('${item['cnpj']}')}';
+    }
+    if (existing != null && existing.trim().isNotEmpty) {
+      values.putIfAbsent(existing, () => existing);
+    }
+    return values.entries.toList();
   }
 
   @override
@@ -228,6 +276,11 @@ class _WorkspaceState extends State<Workspace> {
         movements = rows(data['movements']);
         audit = rows(data['audit']);
         plans = rows(data['plans']);
+        paymentMethods = rows(data['paymentMethods'] ?? []);
+        costCenters = rows(data['costCenters'] ?? []);
+        attachments = rows(data['attachments'] ?? []);
+        permissions = RecordData.from(data['permissions'] ?? const {});
+        selectedTitleIds.clear();
         loading = false;
       });
     } catch (e) {
@@ -262,6 +315,7 @@ class _WorkspaceState extends State<Workspace> {
   }
 
   String get base => '/companies/$company';
+  String get serviceOrigin => kIsWeb ? Uri.base.origin : apiBase;
   Color get mutedText => darkMode ? const Color(0xFFE1E8E6) : Colors.black54;
   Color get faintText => darkMode ? const Color(0xFFBEC9C6) : Colors.black45;
   Color get headingColor => darkMode ? const Color(0xFF8ED6D0) : teal;
@@ -288,284 +342,138 @@ class _WorkspaceState extends State<Workspace> {
     child: MediaQuery(
       data: MediaQuery.of(context)
           .copyWith(textScaler: TextScaler.linear(fontScale)),
-      child: Scaffold(
-        body: Row(
-          children: [
-            SizedBox(
-              width: 224,
-              child: ColoredBox(
-                color: teal,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    const Padding(
-                      padding: EdgeInsets.fromLTRB(25, 33, 20, 5),
-                      child: Text(
-                        'monalisa',
-                        style: TextStyle(
-                          fontSize: 32,
-                          fontWeight: FontWeight.w800,
-                          letterSpacing: -1.5,
-                          color: Colors.white,
-                        ),
-                      ),
-                    ),
-                    const Padding(
-                      padding: EdgeInsets.fromLTRB(27, 0, 20, 36),
-                      child: Text(
-                        'F I N A N C E I R O',
-                        style: TextStyle(
-                          color: Color(0xFFFFBE67),
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                    for (int i = 0; i < labels.length; i++)
-                      if (pageAllowed(i) && (i != 7 || canManageAccess))
-                        Padding(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 4,
+      child: CallbackShortcuts(
+        bindings: {
+          const SingleActivator(LogicalKeyboardKey.keyN, control: true): () {
+            if (page == 1) titleForm('payable');
+            if (page == 2) titleForm('receivable');
+          },
+          const SingleActivator(LogicalKeyboardKey.keyR, control: true): load,
+          const CharacterActivator('ç', alt: true): showBackupTools,
+          const CharacterActivator('Ç', alt: true): showBackupTools,
+          const SingleActivator(LogicalKeyboardKey.keyF, control: true): () {
+            if (page != 1 && page != 2) setState(() => page = 1);
+          },
+        },
+        child: Focus(
+          autofocus: true,
+          child: Scaffold(
+            body: Row(
+              children: [
+                SizedBox(
+                  width: 224,
+                  child: ColoredBox(
+                    color: teal,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        const Padding(
+                          padding: EdgeInsets.fromLTRB(25, 33, 20, 5),
+                          child: Text(
+                            'monalisa',
+                            style: TextStyle(
+                              fontSize: 32,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: -1.5,
+                              color: Colors.white,
+                            ),
                           ),
-                          child: ListTile(
-                            shape: RoundedRectangleBorder(
+                        ),
+                        const Padding(
+                          padding: EdgeInsets.fromLTRB(27, 0, 20, 36),
+                          child: Text(
+                            'F I N A N C E I R O',
+                            style: TextStyle(
+                              color: Color(0xFFFFBE67),
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                        for (int i = 0; i < labels.length; i++)
+                          if (pageAllowed(i) && (i != 7 || canManageAccess))
+                            Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                                vertical: 4,
+                              ),
+                              child: ListTile(
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                selected: page == i,
+                                selectedTileColor: const Color(0xFF226064),
+                                leading: Icon(
+                                  icons[i],
+                                  size: 21,
+                                  color: page == i
+                                      ? const Color(0xFFFFB651)
+                                      : Colors.white60,
+                                ),
+                                title: Text(
+                                  labels[i],
+                                  style: TextStyle(
+                                    color: page == i
+                                        ? Colors.white
+                                        : Colors.white70,
+                                    fontSize: 14,
+                                    fontWeight: page == i
+                                        ? FontWeight.w600
+                                        : FontWeight.normal,
+                                  ),
+                                ),
+                                onTap: () {
+                                  setState(() {
+                                    page = i;
+                                    search = '';
+                                    selectedTitleIds.clear();
+                                    filter = i == 1 || i == 2
+                                        ? 'Em aberto'
+                                        : 'Todos';
+                                    if (i == 1 || i == 2) {
+                                      selectedMonth = iso(DateTime.now())
+                                          .substring(0, 7);
+                                    }
+                                  });
+                                  if (i == 7) loadAdminData();
+                                },
+                              ),
+                            ),
+                        const Spacer(),
+                        Padding(
+                          padding: const EdgeInsets.all(20),
+                          child: Container(
+                            padding: const EdgeInsets.all(14),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withValues(alpha: .07),
                               borderRadius: BorderRadius.circular(12),
                             ),
-                            selected: page == i,
-                            selectedTileColor: const Color(0xFF226064),
-                            leading: Icon(
-                              icons[i],
-                              size: 21,
-                              color: page == i
-                                  ? const Color(0xFFFFB651)
-                                  : Colors.white60,
-                            ),
-                            title: Text(
-                              labels[i],
-                              style: TextStyle(
-                                color: page == i
-                                    ? Colors.white
-                                    : Colors.white70,
-                                fontSize: 14,
-                                fontWeight: page == i
-                                    ? FontWeight.w600
-                                    : FontWeight.normal,
-                              ),
-                            ),
-                            onTap: () {
-                              setState(() {
-                                page = i;
-                                search = '';
-                                filter = i == 1 || i == 2
-                                    ? 'Em aberto'
-                                    : 'Todos';
-                                if (i == 1 || i == 2) {
-                                  selectedMonth = iso(DateTime.now())
-                                      .substring(0, 7);
-                                }
-                              });
-                              if (i == 7) loadAdminData();
-                            },
-                          ),
-                        ),
-                    const Spacer(),
-                    Padding(
-                      padding: const EdgeInsets.all(20),
-                      child: Container(
-                        padding: const EdgeInsets.all(14),
-                        decoration: BoxDecoration(
-                          color: Colors.white.withValues(alpha: .07),
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: const Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
+                            child: const Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Icon(
-                                  Icons.circle,
-                                  size: 7,
-                                  color: Color(0xFFBFD4AF),
-                                ),
-                                SizedBox(width: 8),
-                                Text(
-                                  'Ambiente de teste',
-                                  style: TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 12,
-                                  ),
-                                ),
-                              ],
-                            ),
-                            SizedBox(height: 6),
-                            Text(
-                              'Dados salvos nesta máquina',
-                              style: TextStyle(
-                                color: Colors.white54,
-                                fontSize: 11,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            Expanded(
-              child: Column(
-                children: [
-                  Container(
-                    height: 82,
-                    padding: const EdgeInsets.symmetric(horizontal: 30),
-                    decoration: BoxDecoration(
-                      color: darkMode ? const Color(0xFF1E1E1E) : Colors.white,
-                      border: const Border(
-                        bottom: BorderSide(color: Color(0xFFE7E5DD)),
-                      ),
-                    ),
-                    child: Row(
-                      children: [
-                        const Icon(
-                          Icons.business_outlined,
-                          color: teal,
-                          size: 21,
-                        ),
-                        const SizedBox(width: 12),
-                        if (companies.isNotEmpty)
-                          SizedBox(
-                            width: 245,
-                            child: DropdownButtonHideUnderline(
-                              child: DropdownButton<int>(
-                                isExpanded: true,
-                                value: company,
-                                items: companies
-                                    .map(
-                                      (c) => DropdownMenuItem<int>(
-                                        value: c['id'],
-                                        child: Text(
-                                          c['name'],
-                                          overflow: TextOverflow.ellipsis,
-                                          style: const TextStyle(
-                                            fontWeight: FontWeight.w600,
-                                            fontSize: 14,
-                                          ),
-                                        ),
+                                Row(
+                                  children: [
+                                    Icon(
+                                      Icons.circle,
+                                      size: 7,
+                                      color: Color(0xFFBFD4AF),
+                                    ),
+                                    SizedBox(width: 8),
+                                    Text(
+                                      'Ambiente de teste',
+                                      style: TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 12,
                                       ),
-                                    )
-                                    .toList(),
-                                onChanged: loading
-                                    ? null
-                                    : (v) {
-                                        if (v != null) {
-                                          setState(() {
-                                            company = v;
-                                            if (roleForCompany(v) == 'user' &&
-                                                !pageAllowed(page)) {
-                                              page = 0;
-                                            }
-                                          });
-                                          load().then((_) {
-                                            if (page == 7) loadAdminData();
-                                          });
-                                        }
-                                      },
-                              ),
-                            ),
-                          ),
-                        const Spacer(),
-                        IconButton(
-                          tooltip: 'Diminuir letras',
-                          onPressed: fontScale <= .9
-                              ? null
-                              : () => setState(
-                                  () => fontScale = (fontScale - .1).clamp(
-                                    .9,
-                                    1.4,
-                                  ),
+                                    ),
+                                  ],
                                 ),
-                          icon: const Icon(Icons.text_decrease, size: 20),
-                        ),
-                        Text(
-                          '${(fontScale * 100).round()}%',
-                          style: TextStyle(fontSize: 11, color: mutedText),
-                        ),
-                        IconButton(
-                          tooltip: 'Aumentar letras',
-                          onPressed: fontScale >= 1.4
-                              ? null
-                              : () => setState(
-                                  () => fontScale = (fontScale + .1).clamp(
-                                    .9,
-                                    1.4,
-                                  ),
-                                ),
-                          icon: const Icon(Icons.text_increase, size: 20),
-                        ),
-                        IconButton(
-                          tooltip: darkMode
-                              ? 'Usar modo claro'
-                              : 'Usar modo escuro',
-                          onPressed: () => setState(() => darkMode = !darkMode),
-                          icon: Icon(
-                            darkMode
-                                ? Icons.light_mode_outlined
-                                : Icons.dark_mode_outlined,
-                            size: 20,
-                          ),
-                        ),
-                        Text(
-                          dateLabel(iso(DateTime.now())),
-                          style: TextStyle(color: mutedText, fontSize: 12),
-                        ),
-                        const SizedBox(width: 16),
-                        IconButton(
-                          tooltip: 'Atualizar',
-                          onPressed: loading ? null : load,
-                          icon: const Icon(Icons.refresh, size: 21),
-                        ),
-                        PopupMenuButton<String>(
-                          tooltip: 'USUÁRIO CONECTADO',
-                          onSelected: (value) {
-                            if (value == 'logout') widget.onLogout();
-                          },
-                          itemBuilder: (_) => [
-                            PopupMenuItem<String>(
-                              enabled: false,
-                              child: Text(
-                                '${widget.user['name']}\n${globalAdmin
-                                    ? 'ADMINISTRADOR GERAL'
-                                    : financialUser
-                                    ? 'USUÁRIO FINANCEIRO'
-                                    : 'ADMINISTRADOR DA EMPRESA'}',
-                              ),
-                            ),
-                            const PopupMenuDivider(),
-                            const PopupMenuItem<String>(
-                              value: 'logout',
-                              child: ListTile(
-                                contentPadding: EdgeInsets.zero,
-                                leading: Icon(Icons.logout),
-                                title: Text('SAIR'),
-                              ),
-                            ),
-                          ],
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 10,
-                              vertical: 8,
-                            ),
-                            child: Row(
-                              children: [
-                                const Icon(Icons.account_circle_outlined),
-                                const SizedBox(width: 7),
+                                SizedBox(height: 6),
                                 Text(
-                                  widget.user['username'],
-                                  style: const TextStyle(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w600,
+                                  'Dados salvos nesta máquina',
+                                  style: TextStyle(
+                                    color: Colors.white54,
+                                    fontSize: 11,
                                   ),
                                 ),
                               ],
@@ -575,208 +483,393 @@ class _WorkspaceState extends State<Workspace> {
                       ],
                     ),
                   ),
-                  if (license['status'] == 'warning' ||
-                      license['status'] == 'read_only')
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 24,
-                        vertical: 12,
-                      ),
-                      color: license['status'] == 'read_only'
-                          ? const Color(0xFFD9EAF5)
-                          : const Color(0xFFFFE5B8),
-                      child: Row(
-                        children: [
-                          Icon(
-                            license['status'] == 'read_only'
-                                ? Icons.visibility_outlined
-                                : Icons.warning_amber_rounded,
-                            color: teal,
+                ),
+                Expanded(
+                  child: Column(
+                    children: [
+                      Container(
+                        height: 82,
+                        padding: const EdgeInsets.symmetric(horizontal: 30),
+                        decoration: BoxDecoration(
+                          color: darkMode
+                              ? const Color(0xFF1E1E1E)
+                              : Colors.white,
+                          border: const Border(
+                            bottom: BorderSide(color: Color(0xFFE7E5DD)),
                           ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Text(
-                              license['status'] == 'read_only'
-                                  ? 'SOMENTE CONSULTA • ${license['message'] ?? 'ENTRE EM CONTATO COM A MONALISA.'}'
-                                  : 'AVISO DA MONALISA • ${license['message'] ?? ''}',
-                              style: const TextStyle(
-                                color: teal,
-                                fontWeight: FontWeight.w700,
-                                fontSize: 12,
+                        ),
+                        child: Row(
+                          children: [
+                            const Icon(
+                              Icons.business_outlined,
+                              color: teal,
+                              size: 21,
+                            ),
+                            const SizedBox(width: 12),
+                            if (companies.length == 1)
+                              Text(
+                                '${companies.first['name']}',
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 14,
+                                ),
+                              )
+                            else if (companies.length > 1)
+                              SizedBox(
+                                width: 245,
+                                child: DropdownButtonHideUnderline(
+                                  child: DropdownButton<int>(
+                                    isExpanded: true,
+                                    value: company,
+                                    items: companies
+                                        .map(
+                                          (c) => DropdownMenuItem<int>(
+                                            value: c['id'],
+                                            child: Text(
+                                              c['name'],
+                                              overflow: TextOverflow.ellipsis,
+                                              style: const TextStyle(
+                                                fontWeight: FontWeight.w600,
+                                                fontSize: 14,
+                                              ),
+                                            ),
+                                          ),
+                                        )
+                                        .toList(),
+                                    onChanged: loading
+                                        ? null
+                                        : (v) {
+                                            if (v != null) {
+                                              setState(() {
+                                                company = v;
+                                                if (roleForCompany(v) ==
+                                                        'user' &&
+                                                    !pageAllowed(page)) {
+                                                  page = 0;
+                                                }
+                                              });
+                                              load().then((_) {
+                                                if (page == 7) loadAdminData();
+                                              });
+                                            }
+                                          },
+                                  ),
+                                ),
                               ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  Expanded(
-                    child: loading
-                        ? const Center(child: CircularProgressIndicator())
-                        : error != null
-                        ? Center(
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                const Icon(
-                                  Icons.cloud_off,
-                                  size: 44,
-                                  color: teal,
-                                ),
-                                const SizedBox(height: 16),
-                                Text(error!),
-                                const SizedBox(height: 20),
-                                FilledButton(
-                                  onPressed: load,
-                                  child: const Text('Tentar novamente'),
-                                ),
-                              ],
-                            ),
-                          )
-                        : SingleChildScrollView(
-                            padding: const EdgeInsets.all(30),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.stretch,
-                              children: [
-                                Wrap(
-                                  alignment: WrapAlignment.spaceBetween,
-                                  crossAxisAlignment: WrapCrossAlignment.start,
-                                  spacing: 16,
-                                  runSpacing: 16,
-                                  children: [
-                                    SizedBox(
-                                      width: 330,
-                                      child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
-                                          Text(
-                                            labels[page],
-                                            style: TextStyle(
-                                              fontSize: 28,
-                                              fontWeight: FontWeight.w700,
-                                              color: headingColor,
-                                              letterSpacing: -.7,
-                                            ),
-                                          ),
-                                          const SizedBox(height: 5),
-                                          Text(
-                                            [
-                                              'O financeiro do supermercado em um só lugar.',
-                                              'Compras, fornecedores e despesas da operação.',
-                                              'Cartões, PIX, vales, convênios e outros recebimentos.',
-                                              'Movimento realizado e previsão de caixa da loja.',
-                                              'Fornecedores, clientes, planos, setores e contas.',
-                                              'Rastreabilidade das operações da empresa.',
-                                              'Documentos claros para conferir, salvar e compartilhar.',
-                                              'Empresas, lojas e pessoas autorizadas a acessar o sistema.',
-                                            ][page],
-                                            style: TextStyle(
-                                              color: mutedText,
-                                              fontSize: 13,
-                                            ),
-                                          ),
-                                        ],
+                            const Spacer(),
+                            IconButton(
+                              tooltip: 'Diminuir letras',
+                              onPressed: fontScale <= .9
+                                  ? null
+                                  : () => setState(
+                                      () => fontScale = (fontScale - .1).clamp(
+                                        .9,
+                                        1.4,
                                       ),
                                     ),
-                                    if (page == 0)
-                                      Wrap(
-                                        spacing: 10,
-                                        runSpacing: 10,
-                                        children: [
-                                          FilledButton.icon(
-                                            onPressed: () =>
-                                                quickTitleConversation(
-                                                  'payable',
-                                                ),
-                                            icon: const Icon(
-                                              Icons.add,
-                                              size: 19,
-                                            ),
-                                            label: const Text('Criar despesa'),
-                                          ),
-                                          FilledButton.icon(
-                                            onPressed: () =>
-                                                quickTitleConversation(
-                                                  'receivable',
-                                                ),
-                                            icon: const Icon(
-                                              Icons.add,
-                                              size: 19,
-                                            ),
-                                            label: const Text(
-                                              'Criar recebimento',
-                                            ),
-                                          ),
-                                        ],
-                                      )
-                                    else if (page <= 2)
-                                      Wrap(
-                                        spacing: 10,
-                                        runSpacing: 10,
-                                        children: [
-                                          FilledButton.icon(
-                                            onPressed: () => titleForm(
-                                              page == 2
-                                                  ? 'receivable'
-                                                  : 'payable',
-                                            ),
-                                            icon: const Icon(
-                                              Icons.add,
-                                              size: 19,
-                                            ),
-                                            label: Text(
-                                              page == 2
-                                                  ? 'Nova receita'
-                                                  : 'Nova despesa',
-                                            ),
-                                          ),
-                                          if (page == 1 || page == 2)
-                                            FilledButton.icon(
-                                              onPressed: reportBusy
-                                                  ? null
-                                                  : () => showTitleReports(
-                                                      page == 1
-                                                          ? 'payable'
-                                                          : 'receivable',
-                                                    ),
-                                              icon: const Icon(
-                                                Icons.picture_as_pdf_outlined,
-                                                size: 19,
-                                              ),
-                                              label: const Text('Relatórios'),
-                                            ),
-                                        ],
+                              icon: const Icon(Icons.text_decrease, size: 20),
+                            ),
+                            Text(
+                              '${(fontScale * 100).round()}%',
+                              style: TextStyle(fontSize: 11, color: mutedText),
+                            ),
+                            IconButton(
+                              tooltip: 'Aumentar letras',
+                              onPressed: fontScale >= 1.4
+                                  ? null
+                                  : () => setState(
+                                      () => fontScale = (fontScale + .1).clamp(
+                                        .9,
+                                        1.4,
                                       ),
-                                  ],
+                                    ),
+                              icon: const Icon(Icons.text_increase, size: 20),
+                            ),
+                            IconButton(
+                              tooltip: darkMode
+                                  ? 'Usar modo claro'
+                                  : 'Usar modo escuro',
+                              onPressed: () =>
+                                  setState(() => darkMode = !darkMode),
+                              icon: Icon(
+                                darkMode
+                                    ? Icons.light_mode_outlined
+                                    : Icons.dark_mode_outlined,
+                                size: 20,
+                              ),
+                            ),
+                            Text(
+                              dateLabel(iso(DateTime.now())),
+                              style: TextStyle(color: mutedText, fontSize: 12),
+                            ),
+                            const SizedBox(width: 16),
+                            IconButton(
+                              tooltip: 'Atualizar',
+                              onPressed: loading ? null : load,
+                              icon: const Icon(Icons.refresh, size: 21),
+                            ),
+                            PopupMenuButton<String>(
+                              tooltip: 'USUÁRIO CONECTADO',
+                              onSelected: (value) {
+                                if (value == 'logout') widget.onLogout();
+                              },
+                              itemBuilder: (_) => [
+                                PopupMenuItem<String>(
+                                  enabled: false,
+                                  child: Text(
+                                    '${widget.user['name']}\n${globalAdmin
+                                        ? 'ADMINISTRADOR GERAL'
+                                        : financialUser
+                                        ? 'USUÁRIO FINANCEIRO'
+                                        : 'ADMINISTRADOR DA EMPRESA'}',
+                                  ),
                                 ),
-                                const SizedBox(height: 25),
-                                if (page == 0) ...dashboard(),
-                                if (page == 1 || page == 2) ...titlePage(),
-                                if (page == 3 && !financialUser) ...cashPage(),
-                                if (page == 4) ...registryPage(),
-                                if (page == 5 && !financialUser)
-                                  ...historyPage(),
-                                if (page == 6) ...reportsPage(),
-                                if (page == 7 && canManageAccess)
-                                  ...adminPage(),
-                                const SizedBox(height: 25),
-                                Text(
-                                  'MONALISA SISTEMAS  /  Financeiro local • versão inicial',
-                                  style: TextStyle(
-                                    color: faintText,
-                                    fontSize: 10,
-                                    letterSpacing: .8,
+                                const PopupMenuDivider(),
+                                const PopupMenuItem<String>(
+                                  value: 'logout',
+                                  child: ListTile(
+                                    contentPadding: EdgeInsets.zero,
+                                    leading: Icon(Icons.logout),
+                                    title: Text('SAIR'),
                                   ),
                                 ),
                               ],
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 8,
+                                ),
+                                child: Row(
+                                  children: [
+                                    const Icon(Icons.account_circle_outlined),
+                                    const SizedBox(width: 7),
+                                    Text(
+                                      widget.user['username'],
+                                      style: const TextStyle(
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
                             ),
+                          ],
+                        ),
+                      ),
+                      if (license['status'] == 'warning' ||
+                          license['status'] == 'read_only')
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 24,
+                            vertical: 12,
                           ),
+                          color: license['status'] == 'read_only'
+                              ? const Color(0xFFD9EAF5)
+                              : const Color(0xFFFFE5B8),
+                          child: Row(
+                            children: [
+                              Icon(
+                                license['status'] == 'read_only'
+                                    ? Icons.visibility_outlined
+                                    : Icons.warning_amber_rounded,
+                                color: teal,
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Text(
+                                  license['status'] == 'read_only'
+                                      ? 'SOMENTE CONSULTA • ${license['message'] ?? 'ENTRE EM CONTATO COM A MONALISA.'}'
+                                      : 'AVISO DA MONALISA • ${license['message'] ?? ''}',
+                                  style: const TextStyle(
+                                    color: teal,
+                                    fontWeight: FontWeight.w700,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      Expanded(
+                        child: loading
+                            ? const Center(child: CircularProgressIndicator())
+                            : error != null
+                            ? Center(
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(
+                                      Icons.cloud_off,
+                                      size: 44,
+                                      color: teal,
+                                    ),
+                                    const SizedBox(height: 16),
+                                    Text(error!),
+                                    const SizedBox(height: 20),
+                                    FilledButton(
+                                      onPressed: load,
+                                      child: const Text('Tentar novamente'),
+                                    ),
+                                  ],
+                                ),
+                              )
+                            : SingleChildScrollView(
+                                padding: const EdgeInsets.all(30),
+                                child: Column(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.stretch,
+                                  children: [
+                                    Wrap(
+                                      alignment: WrapAlignment.spaceBetween,
+                                      crossAxisAlignment:
+                                          WrapCrossAlignment.start,
+                                      spacing: 16,
+                                      runSpacing: 16,
+                                      children: [
+                                        SizedBox(
+                                          width: 330,
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                labels[page],
+                                                style: TextStyle(
+                                                  fontSize: 28,
+                                                  fontWeight: FontWeight.w700,
+                                                  color: headingColor,
+                                                  letterSpacing: -.7,
+                                                ),
+                                              ),
+                                              const SizedBox(height: 5),
+                                              Text(
+                                                [
+                                                  'O financeiro do supermercado em um só lugar.',
+                                                  'Compras, fornecedores e despesas da operação.',
+                                                  'Cartões, PIX, vales, convênios e outros recebimentos.',
+                                                  'Movimento realizado e previsão de caixa da loja.',
+                                                  'Fornecedores, clientes, planos, setores e contas.',
+                                                  'Rastreabilidade das operações da empresa.',
+                                                  'Documentos claros para conferir, salvar e compartilhar.',
+                                                  'Empresas, lojas e pessoas autorizadas a acessar o sistema.',
+                                                ][page],
+                                                style: TextStyle(
+                                                  color: mutedText,
+                                                  fontSize: 13,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                        if (page == 0)
+                                          Wrap(
+                                            spacing: 10,
+                                            runSpacing: 10,
+                                            children: [
+                                              FilledButton.icon(
+                                                onPressed: () =>
+                                                    quickTitleConversation(
+                                                      'payable',
+                                                    ),
+                                                icon: const Icon(
+                                                  Icons.add,
+                                                  size: 19,
+                                                ),
+                                                label: const Text(
+                                                  'Criar despesa',
+                                                ),
+                                              ),
+                                              FilledButton.icon(
+                                                onPressed: () =>
+                                                    quickTitleConversation(
+                                                      'receivable',
+                                                    ),
+                                                icon: const Icon(
+                                                  Icons.add,
+                                                  size: 19,
+                                                ),
+                                                label: const Text(
+                                                  'Criar recebimento',
+                                                ),
+                                              ),
+                                            ],
+                                          )
+                                        else if (page <= 2)
+                                          Wrap(
+                                            spacing: 10,
+                                            runSpacing: 10,
+                                            children: [
+                                              FilledButton.icon(
+                                                onPressed: () => titleForm(
+                                                  page == 2
+                                                      ? 'receivable'
+                                                      : 'payable',
+                                                ),
+                                                icon: const Icon(
+                                                  Icons.add,
+                                                  size: 19,
+                                                ),
+                                                label: Text(
+                                                  page == 2
+                                                      ? 'Nova receita'
+                                                      : 'Nova despesa',
+                                                ),
+                                              ),
+                                              if (page == 1 || page == 2)
+                                                FilledButton.icon(
+                                                  onPressed: reportBusy
+                                                      ? null
+                                                      : () => showTitleReports(
+                                                          page == 1
+                                                              ? 'payable'
+                                                              : 'receivable',
+                                                        ),
+                                                  icon: const Icon(
+                                                    Icons
+                                                        .picture_as_pdf_outlined,
+                                                    size: 19,
+                                                  ),
+                                                  label: const Text(
+                                                    'Relatórios',
+                                                  ),
+                                                ),
+                                            ],
+                                          ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 25),
+                                    if (page == 0) ...dashboard(),
+                                    if (page == 1 || page == 2) ...titlePage(),
+                                    if (page == 3 && !financialUser)
+                                      ...cashPage(),
+                                    if (page == 4) ...registryPage(),
+                                    if (page == 5 && !financialUser)
+                                      ...historyPage(),
+                                    if (page == 6) ...reportsPage(),
+                                    if (page == 7 && canManageAccess)
+                                      ...adminPage(),
+                                    const SizedBox(height: 25),
+                                    Text(
+                                      'MONALISA SISTEMAS  /  FINANCEIRO WINDOWS • VERSÃO $appVersion',
+                                      style: TextStyle(
+                                        color: faintText,
+                                        fontSize: 10,
+                                        letterSpacing: .8,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                      ),
+                    ],
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
-          ],
+          ),
         ),
       ),
     ),
@@ -889,30 +982,60 @@ class _WorkspaceState extends State<Workspace> {
             ...companyUsers.map((access) {
               final active = access['active'] == 1;
               final admin = access['role'] == 'admin';
-              return ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: CircleAvatar(
-                  backgroundColor: active
-                      ? teal.withValues(alpha: .10)
-                      : Colors.grey.withValues(alpha: .15),
-                  child: Icon(
-                    admin
-                        ? Icons.admin_panel_settings_outlined
-                        : Icons.person_outline,
-                    color: active ? teal : Colors.grey,
+              return Card(
+                margin: const EdgeInsets.only(bottom: 10),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 8,
                   ),
-                ),
-                title: Text(
-                  access['name'],
-                  style: const TextStyle(fontWeight: FontWeight.w700),
-                ),
-                subtitle: Text(
-                  '${access['username']} • ${admin ? 'ADMINISTRADOR DA EMPRESA' : 'USUÁRIO FINANCEIRO'}',
-                ),
-                trailing: FilledButton.tonalIcon(
-                  onPressed: () => changeUserAccess(access, !active),
-                  icon: Icon(active ? Icons.lock_outline : Icons.lock_open),
-                  label: Text(active ? 'BLOQUEAR' : 'LIBERAR'),
+                  child: Column(
+                    children: [
+                      ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: CircleAvatar(
+                          backgroundColor: active
+                              ? teal.withValues(alpha: .10)
+                              : Colors.grey.withValues(alpha: .15),
+                          child: Icon(
+                            admin
+                                ? Icons.admin_panel_settings_outlined
+                                : Icons.person_outline,
+                            color: active ? teal : Colors.grey,
+                          ),
+                        ),
+                        title: Text(
+                          access['name'],
+                          style: const TextStyle(fontWeight: FontWeight.w700),
+                        ),
+                        subtitle: Text(
+                          '${access['username']} • ${admin ? 'ADMINISTRADOR DA EMPRESA' : 'USUÁRIO FINANCEIRO'}',
+                        ),
+                        trailing: FilledButton.tonalIcon(
+                          onPressed: () => changeUserAccess(access, !active),
+                          icon: Icon(
+                            active ? Icons.lock_outline : Icons.lock_open,
+                          ),
+                          label: Text(active ? 'BLOQUEAR' : 'LIBERAR'),
+                        ),
+                      ),
+                      if (!admin)
+                        SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
+                          title: const Text(
+                            'PERMITIR ALTERAR JUROS, MULTA E DESCONTO',
+                          ),
+                          subtitle: const Text(
+                            'QUANDO DESATIVADO, O USUÁRIO APENAS USA OS PERCENTUAIS DEFINIDOS PELO ADMINISTRADOR.',
+                          ),
+                          value: access['canManagePlanRates'] == 1,
+                          onChanged: active
+                              ? (value) =>
+                                    changePlanRatePermission(access, value)
+                              : null,
+                        ),
+                    ],
+                  ),
                 ),
               );
             }),
@@ -958,6 +1081,18 @@ class _WorkspaceState extends State<Workspace> {
                 ]
               : const [MapEntry('user', 'Usuário financeiro')],
         ),
+        FormFieldSpec(
+          'canManagePlanRates',
+          'Pode alterar juros, multa e desconto?',
+          initial: 'false',
+          options: const [
+            MapEntry(
+              'false',
+              'NÃO, USAR SOMENTE A CONFIGURAÇÃO DO ADMINISTRADOR',
+            ),
+            MapEntry('true', 'SIM, PERMITIR ALTERAÇÕES'),
+          ],
+        ),
       ],
       (values) async {
         final accessPin = values['pin'] ?? '';
@@ -972,6 +1107,7 @@ class _WorkspaceState extends State<Workspace> {
           'username': values['username'],
           'pin': accessPin,
           'role': values['role'],
+          'canManagePlanRates': values['canManagePlanRates'] == 'true',
         });
         await loadCompanyUsers();
       },
@@ -1013,10 +1149,23 @@ class _WorkspaceState extends State<Workspace> {
             MapEntry('user', 'Usuário financeiro'),
           ],
         ),
+        FormFieldSpec(
+          'canManagePlanRates',
+          'Pode alterar juros, multa e desconto?',
+          initial: 'false',
+          options: const [
+            MapEntry(
+              'false',
+              'NÃO, USAR SOMENTE A CONFIGURAÇÃO DO ADMINISTRADOR',
+            ),
+            MapEntry('true', 'SIM, PERMITIR ALTERAÇÕES'),
+          ],
+        ),
       ],
       (values) async {
         await api.request('$base/users/${values['userId']}/link', {
           'role': values['role'],
+          'canManagePlanRates': values['canManagePlanRates'] == 'true',
         });
         await loadAdminData();
       },
@@ -1051,9 +1200,28 @@ class _WorkspaceState extends State<Workspace> {
       await api.request('$base/users/${access['id']}/access', {
         'role': access['role'],
         'active': active,
+        'canManagePlanRates': access['canManagePlanRates'] == 1,
       });
       await loadCompanyUsers();
       message(active ? 'ACESSO LIBERADO.' : 'ACESSO BLOQUEADO.');
+    } catch (e) {
+      message(e.toString().replaceFirst('Exception: ', ''));
+    }
+  }
+
+  Future<void> changePlanRatePermission(RecordData access, bool allowed) async {
+    try {
+      await api.request('$base/users/${access['id']}/access', {
+        'role': access['role'],
+        'active': access['active'] == 1,
+        'canManagePlanRates': allowed,
+      });
+      await loadCompanyUsers();
+      message(
+        allowed
+            ? 'ALTERAÇÃO DE JUROS, MULTA E DESCONTO LIBERADA.'
+            : 'ALTERAÇÃO DE JUROS, MULTA E DESCONTO BLOQUEADA.',
+      );
     } catch (e) {
       message(e.toString().replaceFirst('Exception: ', ''));
     }
@@ -1138,6 +1306,52 @@ class _WorkspaceState extends State<Workspace> {
           ],
         ),
       ),
+      const SizedBox(height: 22),
+      panel(
+        'Relatórios detalhados e exportação',
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              'Os relatórios abaixo usam o mesmo período escolhido acima. Você pode salvar em PDF ou CSV.',
+              style: TextStyle(color: mutedText),
+            ),
+            const SizedBox(height: 16),
+            ...const {
+              'overdue': 'Títulos vencidos e dias de atraso',
+              'party': 'Histórico por cliente e fornecedor',
+              'cost-center': 'Receitas e despesas por centro de custo',
+              'account': 'Extrato por conta financeira',
+              'cash-flow': 'Fluxo de caixa previsto e realizado',
+            }.entries.map(
+              (item) => ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.description_outlined, color: teal),
+                title: Text(item.value),
+                trailing: Wrap(
+                  spacing: 8,
+                  children: [
+                    OutlinedButton.icon(
+                      onPressed: reportBusy
+                          ? null
+                          : () => saveAdvancedReport(item.key, false),
+                      icon: const Icon(Icons.picture_as_pdf_outlined),
+                      label: const Text('PDF'),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: reportBusy
+                          ? null
+                          : () => saveAdvancedReport(item.key, true),
+                      icon: const Icon(Icons.table_view_outlined),
+                      label: const Text('CSV'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     ];
   }
 
@@ -1180,12 +1394,44 @@ class _WorkspaceState extends State<Workspace> {
     });
   }
 
+  Future<void> askToOpenPdf(
+    Uint8List bytes,
+    String fileName, {
+    String? savedPath,
+  }) async {
+    if (!mounted) return;
+    final openNow = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        icon: const Icon(Icons.picture_as_pdf_outlined, color: teal, size: 34),
+        title: const Text('PDF GERADO COM SUCESSO'),
+        content: Text(
+          'O arquivo $fileName foi gerado. Deseja abrir o PDF agora?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Agora não'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            icon: const Icon(Icons.open_in_new),
+            label: const Text('Abrir PDF'),
+          ),
+        ],
+      ),
+    );
+    if (openNow == true) {
+      await openGeneratedPdf(bytes, fileName, savedPath: savedPath);
+    }
+  }
+
   Future<void> saveFinancialReport() async {
     if (reportBusy) return;
     setState(() => reportBusy = true);
     try {
       final uri = Uri.parse(
-        '$apiBase/api/companies/$company/reports/financial?start=${iso(reportStart)}&end=${iso(reportEnd)}',
+        '$serviceOrigin/api/companies/$company/reports/financial?start=${iso(reportStart)}&end=${iso(reportEnd)}',
       );
       final response = await api.client
           .get(
@@ -1207,8 +1453,13 @@ class _WorkspaceState extends State<Workspace> {
         mimeType: 'application/pdf',
         name: fileName,
       );
+      String? savedPath;
       if (kIsWeb) {
-        await file.saveTo(fileName);
+        await saveBrowserDownload(
+          response.bodyBytes,
+          fileName,
+          'application/pdf',
+        );
       } else {
         final location = await getSaveLocation(
           suggestedName: fileName,
@@ -1218,10 +1469,70 @@ class _WorkspaceState extends State<Workspace> {
         );
         if (location == null) return;
         await file.saveTo(location.path);
+        savedPath = location.path;
       }
+      await askToOpenPdf(response.bodyBytes, fileName, savedPath: savedPath);
       message('Relatório em PDF gerado com sucesso.');
     } catch (error) {
       message(error.toString().replaceFirst('Exception: ', ''));
+    } finally {
+      if (mounted) setState(() => reportBusy = false);
+    }
+  }
+
+  Future<void> saveAdvancedReport(String type, bool csv) async {
+    if (reportBusy) return;
+    setState(() => reportBusy = true);
+    try {
+      final route = csv ? 'exports/csv' : 'reports/advanced';
+      final uri = Uri.parse(
+        '$serviceOrigin/api/companies/$company/$route?type=$type&start=${iso(reportStart)}&end=${iso(reportEnd)}',
+      );
+      final response = await api.client
+          .get(
+            uri,
+            headers: {
+              if (api.token != null) 'Authorization': 'Bearer ${api.token}',
+            },
+          )
+          .timeout(const Duration(seconds: 30));
+      if (response.statusCode != 200) {
+        throw Exception('Não foi possível gerar o arquivo.');
+      }
+      final extension = csv ? 'csv' : 'pdf';
+      final fileName =
+          '$type-${iso(reportStart)}-a-${iso(reportEnd)}.$extension';
+      String? savedPath;
+      if (kIsWeb) {
+        await saveBrowserDownload(
+          response.bodyBytes,
+          fileName,
+          csv ? 'text/csv;charset=utf-8' : 'application/pdf',
+        );
+      } else {
+        final location = await getSaveLocation(
+          suggestedName: fileName,
+          acceptedTypeGroups: [
+            XTypeGroup(
+              label: csv ? 'Planilha CSV' : 'Documento PDF',
+              extensions: [extension],
+            ),
+          ],
+        );
+        if (location == null) return;
+        await XFile.fromData(
+          response.bodyBytes,
+          mimeType: csv ? 'text/csv' : 'application/pdf',
+          name: fileName,
+        ).saveTo(location.path);
+        savedPath = location.path;
+      }
+      if (!csv) {
+        await askToOpenPdf(response.bodyBytes, fileName, savedPath: savedPath);
+      }
+      message('${csv ? 'CSV' : 'PDF'} gerado com sucesso.');
+    } catch (e) {
+      message(e.toString().replaceFirst('Exception: ', ''));
     } finally {
       if (mounted) setState(() => reportBusy = false);
     }
@@ -1259,19 +1570,19 @@ class _WorkspaceState extends State<Workspace> {
         receivable
             ? 'Contas a receber por plano de contas'
             : 'Contas a pagar por plano de contas',
-        'Lançamentos do mês separados pelo plano de contas.',
+        'Parcelas com saldo em aberto no mês, separadas pelo plano de contas.',
       ),
       'month': (
         receivable
             ? 'Extrato de contas a receber'
             : 'Extrato de contas a pagar',
-        'Todas as contas com vencimento no mês selecionado.',
+        'Somente parcelas com saldo em aberto e vencimento no mês selecionado.',
       ),
       'future': (
         receivable
             ? 'Contas a receber dos próximos meses'
             : 'Contas dos próximos meses',
-        'Contas posteriores ao mês selecionado, separadas por mês.',
+        'Parcelas com saldo em aberto após o mês selecionado, separadas por mês.',
       ),
     };
     await showDialog<void>(
@@ -1344,7 +1655,7 @@ class _WorkspaceState extends State<Workspace> {
     setState(() => reportBusy = true);
     try {
       final uri = Uri.parse(
-        '$apiBase/api/companies/$company/reports/${receivable ? 'receivables' : 'payables'}?month=$selectedMonth&type=$type',
+        '$serviceOrigin/api/companies/$company/reports/${receivable ? 'receivables' : 'payables'}?month=$selectedMonth&type=$type',
       );
       final response = await api.client
           .get(
@@ -1363,8 +1674,13 @@ class _WorkspaceState extends State<Workspace> {
         mimeType: 'application/pdf',
         name: fileName,
       );
+      String? savedPath;
       if (kIsWeb) {
-        await file.saveTo(fileName);
+        await saveBrowserDownload(
+          response.bodyBytes,
+          fileName,
+          'application/pdf',
+        );
       } else {
         final location = await getSaveLocation(
           suggestedName: fileName,
@@ -1374,7 +1690,9 @@ class _WorkspaceState extends State<Workspace> {
         );
         if (location == null) return;
         await file.saveTo(location.path);
+        savedPath = location.path;
       }
+      await askToOpenPdf(response.bodyBytes, fileName, savedPath: savedPath);
       message('Relatório em PDF gerado com sucesso.');
     } catch (error) {
       message(error.toString().replaceFirst('Exception: ', ''));
@@ -1491,6 +1809,52 @@ class _WorkspaceState extends State<Workspace> {
           child,
         ],
       ),
+    ),
+  );
+
+  Widget registrySection({
+    required String title,
+    required String subtitle,
+    required IconData icon,
+    required Widget child,
+    VoidCallback? onAdd,
+    String? addLabel,
+  }) => Card(
+    margin: EdgeInsets.zero,
+    clipBehavior: Clip.antiAlias,
+    child: ExpansionTile(
+      leading: Container(
+        width: 44,
+        height: 44,
+        decoration: BoxDecoration(
+          color: teal.withValues(alpha: darkMode ? .32 : .09),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Icon(icon, color: darkMode ? Colors.white : teal),
+      ),
+      title: Text(
+        title,
+        style: TextStyle(fontWeight: FontWeight.w700, color: headingColor),
+      ),
+      subtitle: Text(subtitle),
+      tilePadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 7),
+      childrenPadding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+      expandedCrossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const Divider(height: 8),
+        if (onAdd != null) ...[
+          Align(
+            alignment: Alignment.centerLeft,
+            child: FilledButton.icon(
+              onPressed: onAdd,
+              icon: const Icon(Icons.add),
+              label: Text(addLabel!),
+            ),
+          ),
+          const SizedBox(height: 12),
+        ],
+        child,
+      ],
     ),
   );
   Widget empty(String text) => Padding(
@@ -1620,7 +1984,8 @@ class _WorkspaceState extends State<Workspace> {
       final cash =
           (settlement['principal'] as num) +
           (settlement['interest'] as num) +
-          (settlement['penalty'] as num) -
+          (settlement['penalty'] as num) +
+          ((settlement['additional'] ?? 0) as num) -
           (settlement['discount'] as num);
       if (title['kind'] == 'receivable') {
         receivedThisMonth += cash;
@@ -1629,6 +1994,20 @@ class _WorkspaceState extends State<Workspace> {
       }
     }
     final monthlyResult = receivedThisMonth - paidThisMonth;
+    final availableBalance = total(accounts, 'balance');
+    final nextWeek = iso(now.add(const Duration(days: 7)));
+    final upcomingPayables = open.where(
+      (e) =>
+          e['kind'] == 'payable' &&
+          (e['due'] as String).compareTo(today) > 0 &&
+          (e['due'] as String).compareTo(nextWeek) <= 0,
+    );
+    final upcomingReceivables = open.where(
+      (e) =>
+          e['kind'] == 'receivable' &&
+          (e['due'] as String).compareTo(today) > 0 &&
+          (e['due'] as String).compareTo(nextWeek) <= 0,
+    );
     final overduePayables = open
         .where(
           (e) =>
@@ -1729,6 +2108,39 @@ class _WorkspaceState extends State<Workspace> {
             '${receivableToday.length} conta(s) com vencimento hoje',
           ),
       ]),
+      if (!financialUser) ...[
+        const SizedBox(height: 12),
+        metricGroup([
+          metric(
+            'Saldo disponível',
+            availableBalance,
+            Icons.account_balance_wallet_outlined,
+            teal,
+            accounts.isEmpty
+                ? 'NENHUMA CONTA FINANCEIRA CADASTRADA'
+                : accounts
+                      .map(
+                        (account) =>
+                            '${account['name']}: ${money(account['balance'])}',
+                      )
+                      .join('  •  '),
+          ),
+          metric(
+            'A pagar nos próximos 7 dias',
+            total(upcomingPayables, 'remaining'),
+            Icons.upcoming_outlined,
+            const Color(0xFFC16A28),
+            '${upcomingPayables.length} próximo(s) vencimento(s)',
+          ),
+          metric(
+            'A receber nos próximos 7 dias',
+            total(upcomingReceivables, 'remaining'),
+            Icons.event_available_outlined,
+            const Color(0xFF267458),
+            '${upcomingReceivables.length} próximo(s) vencimento(s)',
+          ),
+        ]),
+      ],
       const SizedBox(height: 12),
       metricGroup([
         metric(
@@ -1858,13 +2270,26 @@ class _WorkspaceState extends State<Workspace> {
                   '${e['description']} ${e['partyName'] ?? ''} ${e['category']} ${e['documentNumber'] ?? ''} ${e['branch'] ?? ''} ${e['costCenter'] ?? ''}'
                       .toLowerCase()
                       .contains(search.toLowerCase()) &&
+                  (categoryFilter.isEmpty || e['category'] == categoryFilter) &&
+                  (costCenterFilter.isEmpty ||
+                      e['costCenter'] == costCenterFilter) &&
                   (filter == 'Todos' ||
                       (filter == 'Em aberto'
                           ? e['cancelled'] == 0 && e['remaining'] > 0
                           : status(e) == filter)),
             )
             .toList()
-          ..sort((a, b) => (a['due'] as String).compareTo(b['due'] as String));
+          ..sort((a, b) {
+            if (sortTitles == 'value') {
+              return (a['amount'] as num).compareTo(b['amount'] as num);
+            }
+            if (sortTitles == 'name') {
+              return '${a['partyName'] ?? a['description']}'.compareTo(
+                '${b['partyName'] ?? b['description']}',
+              );
+            }
+            return (a['due'] as String).compareTo(b['due'] as String);
+          });
     return [
       Row(
         children: [
@@ -1895,6 +2320,116 @@ class _WorkspaceState extends State<Workspace> {
               onChanged: (v) => setState(() => filter = v!),
             ),
           ),
+        ],
+      ),
+      const SizedBox(height: 12),
+      Wrap(
+        spacing: 12,
+        runSpacing: 12,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          SizedBox(
+            width: 230,
+            child: DropdownButtonFormField<String>(
+              key: ValueKey('category-$categoryFilter'),
+              initialValue: categoryFilter,
+              decoration: const InputDecoration(labelText: 'Plano de contas'),
+              items: [
+                const DropdownMenuItem(value: '', child: Text('Todos')),
+                ...plans.map(
+                  (p) => DropdownMenuItem<String>(
+                    value: '${p['name']}',
+                    child: Text(
+                      '${p['name']}',
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ),
+              ],
+              onChanged: (value) =>
+                  setState(() => categoryFilter = value ?? ''),
+            ),
+          ),
+          SizedBox(
+            width: 220,
+            child: DropdownButtonFormField<String>(
+              key: ValueKey('cost-$costCenterFilter'),
+              initialValue: costCenterFilter,
+              decoration: const InputDecoration(labelText: 'Centro de custo'),
+              items: [
+                const DropdownMenuItem(value: '', child: Text('Todos')),
+                ...costCenters.map(
+                  (p) => DropdownMenuItem<String>(
+                    value: '${p['name']}',
+                    child: Text(
+                      '${p['name']}',
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ),
+              ],
+              onChanged: (value) =>
+                  setState(() => costCenterFilter = value ?? ''),
+            ),
+          ),
+          SizedBox(
+            width: 190,
+            child: DropdownButtonFormField<String>(
+              key: ValueKey('sort-$sortTitles'),
+              initialValue: sortTitles,
+              decoration: const InputDecoration(labelText: 'Ordenar por'),
+              items: const [
+                DropdownMenuItem(value: 'due', child: Text('Vencimento')),
+                DropdownMenuItem(value: 'value', child: Text('Valor')),
+                DropdownMenuItem(value: 'name', child: Text('Nome')),
+              ],
+              onChanged: (value) => setState(() => sortTitles = value ?? 'due'),
+            ),
+          ),
+          if (selectedTitleIds.length >= 2)
+            FilledButton(
+              onPressed: bulkSettleForm,
+              style: FilledButton.styleFrom(
+                backgroundColor: page == 1 ? const Color(0xFF0A5559) : teal,
+                foregroundColor: Colors.white,
+                elevation: 3,
+                shadowColor: teal.withValues(alpha: .28),
+                padding: const EdgeInsets.fromLTRB(18, 13, 12, 13),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(15),
+                ),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.playlist_add_check_circle_outlined),
+                  const SizedBox(width: 10),
+                  Text(
+                    page == 1
+                        ? 'Baixar parcelas selecionadas'
+                        : 'Receber parcelas selecionadas',
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                  const SizedBox(width: 10),
+                  Container(
+                    constraints: const BoxConstraints(minWidth: 30),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 5,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: .18),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    alignment: Alignment.center,
+                    child: Text(
+                      '${selectedTitleIds.length}',
+                      style: const TextStyle(fontWeight: FontWeight.w800),
+                    ),
+                  ),
+                ],
+              ),
+            ),
         ],
       ),
       if (page == 1) ...[
@@ -1963,6 +2498,7 @@ class _WorkspaceState extends State<Workspace> {
                 dataRowMaxHeight: 65,
                 columns:
                     [
+                          '',
                           'Descrição / pessoa',
                           'Vencimento',
                           'Valor',
@@ -1988,6 +2524,21 @@ class _WorkspaceState extends State<Workspace> {
                               )
                             : null,
                         cells: [
+                          DataCell(
+                            Checkbox(
+                              value: selectedTitleIds.contains(t['id']),
+                              onChanged:
+                                  t['cancelled'] == 0 && t['remaining'] > 0
+                                  ? (checked) => setState(() {
+                                      if (checked == true) {
+                                        selectedTitleIds.add(t['id']);
+                                      } else {
+                                        selectedTitleIds.remove(t['id']);
+                                      }
+                                    })
+                                  : null,
+                            ),
+                          ),
                           DataCell(
                             SizedBox(
                               width: 215,
@@ -2111,6 +2662,60 @@ class _WorkspaceState extends State<Workspace> {
   };
 
   List<Widget> cashPage() {
+    final movementQuery = cashMovementSearch.trim().toLowerCase();
+    final filteredMovements = movements.where((movement) {
+      final amount = movement['amount'] as num;
+      final matchesType =
+          cashMovementType == 'all' ||
+          (cashMovementType == 'in' && amount >= 0) ||
+          (cashMovementType == 'out' && amount < 0);
+      final matchesAccount =
+          cashMovementAccount.isEmpty ||
+          '${movement['accountId']}' == cashMovementAccount;
+      final searchable =
+          '${movement['description']} ${movement['accountName']} ${movement['date']} ${dateLabel('${movement['date']}')} ${money(amount)}'
+              .toLowerCase();
+      return matchesType &&
+          matchesAccount &&
+          (movementQuery.isEmpty || searchable.contains(movementQuery));
+    }).toList();
+    num dailyProjected = total(accounts, 'balance');
+    final dailyForecast = <DataRow>[];
+    for (var i = 0; i < 14; i++) {
+      final day = DateUtils.dateOnly(DateTime.now().add(Duration(days: i)));
+      final key = iso(day);
+      final ts = open.where(
+        (t) =>
+            i == 0 ? (t['due'] as String).compareTo(key) <= 0 : t['due'] == key,
+      );
+      final incoming = total(
+        ts.where((t) => t['kind'] == 'receivable'),
+        'remaining',
+      );
+      final outgoing = total(
+        ts.where((t) => t['kind'] == 'payable'),
+        'remaining',
+      );
+      dailyProjected += incoming - outgoing;
+      dailyForecast.add(
+        DataRow(
+          cells: [
+            DataCell(Text('${dateLabel(key)}${i == 0 ? ' + vencidos' : ''}')),
+            DataCell(Text(money(incoming))),
+            DataCell(Text(money(outgoing))),
+            DataCell(
+              Text(
+                money(dailyProjected),
+                style: TextStyle(
+                  color: dailyProjected < 0 ? Colors.red.shade700 : teal,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
     final months = List.generate(
       6,
       (i) => DateTime(DateTime.now().year, DateTime.now().month + i),
@@ -2183,6 +2788,22 @@ class _WorkspaceState extends State<Workspace> {
       ),
       const SizedBox(height: 20),
       panel(
+        'Previsão diária dos próximos 14 dias',
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: DataTable(
+            columns: [
+              'Dia',
+              'Vai entrar',
+              'Vai sair',
+              'Deve sobrar',
+            ].map((s) => DataColumn(label: Text(s))).toList(),
+            rows: dailyForecast,
+          ),
+        ),
+      ),
+      const SizedBox(height: 20),
+      panel(
         'Quanto pode sobrar nos próximos meses',
         Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2213,45 +2834,105 @@ class _WorkspaceState extends State<Workspace> {
       ),
       const SizedBox(height: 20),
       panel(
-        'Dinheiro que já entrou e saiu',
-        movements.isEmpty
-            ? empty('As baixas e transferências aparecem aqui.')
-            : Column(
-                children: movements
-                    .map(
-                      (m) => ListTile(
-                        contentPadding: EdgeInsets.zero,
-                        leading: CircleAvatar(
-                          backgroundColor: const Color(0xFFF1F5EF),
-                          child: Icon(
-                            m['amount'] >= 0
-                                ? Icons.south_west
-                                : Icons.north_east,
-                            color: m['amount'] >= 0 ? teal : orange,
-                            size: 18,
-                          ),
-                        ),
-                        title: Text(
-                          m['description'],
-                          style: const TextStyle(fontSize: 13),
-                        ),
-                        subtitle: Text(
-                          '${dateLabel(m['date'])} • ${m['accountName']}',
-                          style: const TextStyle(fontSize: 11),
-                        ),
-                        trailing: Text(
-                          money(m['amount']),
-                          style: TextStyle(
-                            fontWeight: FontWeight.w600,
-                            color: m['amount'] >= 0
-                                ? teal
-                                : const Color(0xFFB35734),
+        'Dinheiro que já entrou e saiu (${filteredMovements.length})',
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              children: [
+                SizedBox(
+                  width: 360,
+                  child: TextField(
+                    decoration: const InputDecoration(
+                      labelText: 'Pesquisar movimentações',
+                      hintText: 'Descrição, conta, data ou valor',
+                      prefixIcon: Icon(Icons.search),
+                    ),
+                    onChanged: (value) =>
+                        setState(() => cashMovementSearch = value),
+                  ),
+                ),
+                SizedBox(
+                  width: 190,
+                  child: DropdownButtonFormField<String>(
+                    initialValue: cashMovementType,
+                    decoration: const InputDecoration(labelText: 'Movimento'),
+                    items: const [
+                      DropdownMenuItem(value: 'all', child: Text('Todos')),
+                      DropdownMenuItem(value: 'in', child: Text('Entradas')),
+                      DropdownMenuItem(value: 'out', child: Text('Saídas')),
+                    ],
+                    onChanged: (value) =>
+                        setState(() => cashMovementType = value ?? 'all'),
+                  ),
+                ),
+                SizedBox(
+                  width: 250,
+                  child: DropdownButtonFormField<String>(
+                    key: ValueKey('cash-account-$cashMovementAccount'),
+                    initialValue: cashMovementAccount,
+                    decoration: const InputDecoration(labelText: 'Conta'),
+                    items: [
+                      const DropdownMenuItem(
+                        value: '',
+                        child: Text('Todas as contas'),
+                      ),
+                      ...accounts.map(
+                        (account) => DropdownMenuItem(
+                          value: '${account['id']}',
+                          child: Text(
+                            '${account['name']}',
+                            overflow: TextOverflow.ellipsis,
                           ),
                         ),
                       ),
-                    )
-                    .toList(),
+                    ],
+                    onChanged: (value) =>
+                        setState(() => cashMovementAccount = value ?? ''),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            if (filteredMovements.isEmpty)
+              empty(
+                movements.isEmpty
+                    ? 'As baixas e transferências aparecem aqui.'
+                    : 'Nenhuma movimentação corresponde aos filtros.',
+              )
+            else
+              ...filteredMovements.map(
+                (m) => ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: CircleAvatar(
+                    backgroundColor: const Color(0xFFF1F5EF),
+                    child: Icon(
+                      m['amount'] >= 0 ? Icons.south_west : Icons.north_east,
+                      color: m['amount'] >= 0 ? teal : orange,
+                      size: 18,
+                    ),
+                  ),
+                  title: Text(
+                    m['description'],
+                    style: const TextStyle(fontSize: 13),
+                  ),
+                  subtitle: Text(
+                    '${dateLabel(m['date'])} • ${m['accountName']}',
+                    style: const TextStyle(fontSize: 11),
+                  ),
+                  trailing: Text(
+                    money(m['amount']),
+                    style: TextStyle(
+                      fontWeight: FontWeight.w600,
+                      color: m['amount'] >= 0 ? teal : const Color(0xFFB35734),
+                    ),
+                  ),
+                ),
               ),
+          ],
+        ),
         action: TextButton.icon(
           onPressed: transferForm,
           icon: const Icon(Icons.swap_horiz),
@@ -2324,33 +3005,6 @@ class _WorkspaceState extends State<Workspace> {
   }
 
   List<Widget> registryPage() => [
-    Wrap(
-      spacing: 10,
-      runSpacing: 10,
-      children: [
-        FilledButton.icon(
-          onPressed: partyForm,
-          icon: const Icon(Icons.person_add_alt),
-          label: const Text('Adicionar cliente / fornecedor'),
-        ),
-        OutlinedButton.icon(
-          onPressed: accountForm,
-          icon: const Icon(Icons.account_balance_outlined),
-          label: const Text('Conta financeira'),
-        ),
-        OutlinedButton.icon(
-          onPressed: planForm,
-          icon: const Icon(Icons.account_tree_outlined),
-          label: const Text('Plano de contas'),
-        ),
-        OutlinedButton.icon(
-          onPressed: backup,
-          icon: const Icon(Icons.save_outlined),
-          label: const Text('Criar backup'),
-        ),
-      ],
-    ),
-    const SizedBox(height: 22),
     TextField(
       decoration: const InputDecoration(
         hintText: 'Pesquisar cliente ou fornecedor',
@@ -2358,14 +3012,34 @@ class _WorkspaceState extends State<Workspace> {
       ),
       onChanged: (value) => setState(() => registrySearch = value),
     ),
-    const SizedBox(height: 22),
-    panel('Clientes', _partyList('customer')),
-    const SizedBox(height: 22),
-    panel('Fornecedores', _partyList('supplier')),
-    const SizedBox(height: 22),
-    panel(
-      'Planos de contas',
-      Column(
+    const SizedBox(height: 16),
+    registrySection(
+      title: 'Clientes',
+      subtitle:
+          '${parties.where((item) => item['type'] == 'customer').length} CADASTROS',
+      icon: Icons.people_alt_outlined,
+      onAdd: partyForm,
+      addLabel: 'Adicionar cliente / fornecedor',
+      child: _partyList('customer'),
+    ),
+    const SizedBox(height: 12),
+    registrySection(
+      title: 'Fornecedores',
+      subtitle:
+          '${parties.where((item) => item['type'] == 'supplier').length} CADASTROS',
+      icon: Icons.local_shipping_outlined,
+      onAdd: partyForm,
+      addLabel: 'Adicionar cliente / fornecedor',
+      child: _partyList('supplier'),
+    ),
+    const SizedBox(height: 12),
+    registrySection(
+      title: 'Planos de contas',
+      subtitle: '${plans.length} PLANOS CADASTRADOS',
+      icon: Icons.account_tree_outlined,
+      onAdd: canManagePlanRates ? planForm : null,
+      addLabel: 'Adicionar plano de contas',
+      child: Column(
         children: plans
             .map(
               (p) => ListTile(
@@ -2375,30 +3049,36 @@ class _WorkspaceState extends State<Workspace> {
                 subtitle: Text(
                   'Juros: ${p['interestRate']}%  •  Multa: ${p['penaltyRate']}%  •  Desconto: ${p['discountRate']}%',
                 ),
-                trailing: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    IconButton(
-                      tooltip: 'Editar plano',
-                      icon: const Icon(Icons.edit_outlined),
-                      onPressed: () => planForm(p),
-                    ),
-                    IconButton(
-                      tooltip: 'Excluir plano',
-                      icon: const Icon(Icons.delete_outline),
-                      onPressed: () => deleteRegistry('plan', p),
-                    ),
-                  ],
-                ),
+                trailing: canManagePlanRates
+                    ? Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                            tooltip: 'Editar plano',
+                            icon: const Icon(Icons.edit_outlined),
+                            onPressed: () => planForm(p),
+                          ),
+                          IconButton(
+                            tooltip: 'Excluir plano',
+                            icon: const Icon(Icons.delete_outline),
+                            onPressed: () => deleteRegistry('plan', p),
+                          ),
+                        ],
+                      )
+                    : const Chip(label: Text('SOMENTE CONSULTA')),
               ),
             )
             .toList(),
       ),
     ),
-    const SizedBox(height: 22),
-    panel(
-      'Contas financeiras',
-      Column(
+    const SizedBox(height: 12),
+    registrySection(
+      title: 'Contas financeiras',
+      subtitle: '${accounts.length} CONTAS CADASTRADAS',
+      icon: Icons.account_balance_wallet_outlined,
+      onAdd: accountForm,
+      addLabel: 'Adicionar conta financeira',
+      child: Column(
         children: accounts
             .map(
               (a) => ListTile(
@@ -2408,7 +3088,13 @@ class _WorkspaceState extends State<Workspace> {
                   color: teal,
                 ),
                 title: Text(a['name']),
-                subtitle: Text('Saldo inicial: ${money(a['opening'])}'),
+                subtitle: Text(
+                  '${a['type'] == 'bank'
+                      ? 'BANCO'
+                      : a['type'] == 'wallet'
+                      ? 'CARTEIRA / OUTROS'
+                      : 'CAIXA'} • Saldo inicial: ${money(a['opening'])}',
+                ),
                 trailing: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -2418,6 +3104,16 @@ class _WorkspaceState extends State<Workspace> {
                         fontWeight: FontWeight.w700,
                         color: teal,
                       ),
+                    ),
+                    IconButton(
+                      tooltip: 'Ajustar saldo',
+                      icon: const Icon(Icons.tune),
+                      onPressed: () => adjustmentForm(a),
+                    ),
+                    IconButton(
+                      tooltip: 'Editar conta',
+                      icon: const Icon(Icons.edit_outlined),
+                      onPressed: () => accountForm(a),
                     ),
                     IconButton(
                       tooltip: 'Excluir conta',
@@ -2431,6 +3127,99 @@ class _WorkspaceState extends State<Workspace> {
             .toList(),
       ),
     ),
+    const SizedBox(height: 12),
+    registrySection(
+      title: 'Formas de pagamento e recebimento',
+      subtitle: '${paymentMethods.length} FORMAS CADASTRADAS',
+      icon: Icons.payments_outlined,
+      onAdd: paymentMethodForm,
+      addLabel: 'Adicionar forma de pagamento',
+      child: Column(
+        children: paymentMethods
+            .map(
+              (item) => ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: teal.withValues(alpha: .09),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Icon(Icons.payments_outlined, color: teal),
+                ),
+                title: Text(item['name']),
+                subtitle: Text(
+                  item['kind'] == 'both'
+                      ? 'PAGAMENTOS E RECEBIMENTOS'
+                      : item['kind'] == 'payable'
+                      ? 'SOMENTE PAGAMENTOS'
+                      : 'SOMENTE RECEBIMENTOS',
+                ),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      tooltip: 'Editar',
+                      icon: const Icon(Icons.edit_outlined),
+                      onPressed: () => paymentMethodForm(item),
+                    ),
+                    IconButton(
+                      tooltip: 'Excluir',
+                      icon: const Icon(Icons.delete_outline),
+                      onPressed: () => deleteRegistry('paymentMethod', item),
+                    ),
+                  ],
+                ),
+              ),
+            )
+            .toList(),
+      ),
+    ),
+    if (!financialUser) ...[
+      const SizedBox(height: 12),
+      registrySection(
+        title: 'Centros de custo',
+        subtitle: '${costCenters.length} CENTROS CADASTRADOS',
+        icon: Icons.schema_outlined,
+        onAdd: costCenterForm,
+        addLabel: 'Adicionar centro de custo',
+        child: Column(
+          children: costCenters
+              .map(
+                (item) => ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      color: orange.withValues(alpha: .12),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Icon(Icons.schema_outlined, color: orange),
+                  ),
+                  title: Text(item['name']),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        tooltip: 'Editar',
+                        icon: const Icon(Icons.edit_outlined),
+                        onPressed: () => costCenterForm(item),
+                      ),
+                      IconButton(
+                        tooltip: 'Excluir',
+                        icon: const Icon(Icons.delete_outline),
+                        onPressed: () => deleteRegistry('costCenter', item),
+                      ),
+                    ],
+                  ),
+                ),
+              )
+              .toList(),
+        ),
+      ),
+    ],
   ];
 
   Future<void> deleteRegistry(String type, RecordData item) async {
@@ -2438,8 +3227,16 @@ class _WorkspaceState extends State<Workspace> {
       'party': 'cadastro',
       'plan': 'plano de contas',
       'account': 'conta financeira',
+      'paymentMethod': 'forma de pagamento',
+      'costCenter': 'centro de custo',
     };
-    final paths = {'party': 'parties', 'plan': 'plans', 'account': 'accounts'};
+    final paths = {
+      'party': 'parties',
+      'plan': 'plans',
+      'account': 'accounts',
+      'paymentMethod': 'payment-methods',
+      'costCenter': 'cost-centers',
+    };
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (c) => AlertDialog(
@@ -2538,10 +3335,12 @@ class _WorkspaceState extends State<Workspace> {
         ),
         FormFieldSpec(
           'amount',
-          'Valor total (R\$)',
+          'Valor (R\$)',
           required: true,
           money: true,
-          helper: 'Informe o valor completo. Se houver parcelas, vamos dividir este total.',
+          helper: kind == 'payable'
+              ? 'Ao dividir, este é o total. Ao repetir, este valor será usado em cada lançamento.'
+              : 'Ao dividir, este é o total. Ao repetir, este valor será usado em cada recebimento.',
         ),
         FormFieldSpec(
           'due',
@@ -2584,36 +3383,95 @@ class _WorkspaceState extends State<Workspace> {
           hint: 'Digite para buscar ou criar um plano',
           suggestions: plans.map((p) => p['name'] as String).toList(),
         ),
+        if (hasMatrixOrBranch)
+          FormFieldSpec(
+            'branch',
+            'Matriz ou filial',
+            initial: currentCompanyName,
+            required: true,
+            options: branchOptions(),
+            helper: 'Esta opção aparece porque existem CNPJs de matriz e filial com a mesma raiz cadastrados no seu acesso.',
+          ),
+        financialUser
+            ? FormFieldSpec(
+                'costCenter',
+                'Setor ou centro de custo',
+                initial: '',
+                options: [
+                  const MapEntry('', 'NÃO INFORMADO'),
+                  ...costCenters.map(
+                    (item) => MapEntry(
+                      item['name'] as String,
+                      item['name'] as String,
+                    ),
+                  ),
+                ],
+              )
+            : FormFieldSpec(
+                'costCenter',
+                'Setor ou centro de custo',
+                hint: 'Ex.: AÇOUGUE, PADARIA OU ADMINISTRAÇÃO',
+                suggestions: costCenters
+                    .map((item) => item['name'] as String)
+                    .toList(),
+              ),
         FormFieldSpec(
-          'branch',
-          'Filial ou unidade',
-          initial: 'LOJA MATRIZ',
-          suggestions: const [
-            'LOJA MATRIZ',
-            'LOJA 02',
-            'CENTRO DE DISTRIBUIÇÃO',
+          'paymentMethodId',
+          kind == 'payable'
+              ? 'Forma de pagamento prevista'
+              : 'Forma de recebimento prevista',
+          initial: '',
+          options: [
+            const MapEntry('', 'NÃO INFORMADA'),
+            ...options(
+              paymentMethods
+                  .where((m) => m['kind'] == 'both' || m['kind'] == kind)
+                  .toList(),
+            ),
           ],
         ),
         FormFieldSpec(
-          'costCenter',
-          'Setor ou centro de custo',
-          hint: 'Ex.: AÇOUGUE, PADARIA OU ADMINISTRAÇÃO',
-          suggestions: const [
-            'ADMINISTRAÇÃO',
-            'ESTOQUE',
-            'AÇOUGUE',
-            'HORTIFRÚTI',
-            'PADARIA',
-            'FRENTE DE CAIXA',
-            'MANUTENÇÃO',
+          'repeatMode',
+          kind == 'payable'
+              ? 'Como deseja lançar esta despesa?'
+              : 'Como deseja lançar este recebimento?',
+          initial: 'single',
+          required: true,
+          options: const [
+            MapEntry('single', 'CONTA ÚNICA'),
+            MapEntry('monthly', 'DIVIDIR O TOTAL EM PARCELAS MENSAIS'),
+            MapEntry('monthly_repeat', 'REPETIR O MESMO VALOR TODO MÊS'),
+            MapEntry('weekly', 'REPETIR O MESMO VALOR A CADA 7 DIAS'),
+            MapEntry('custom', 'REPETIR EM UM INTERVALO DE DIAS'),
           ],
+          helper: 'Antes de salvar, você poderá conferir e alterar cada valor e vencimento.',
         ),
         FormFieldSpec(
           'installments',
-          'Quantidade de parcelas mensais',
+          kind == 'payable'
+              ? 'Quantidade de lançamentos'
+              : 'Quantidade de parcelas mensais',
           initial: '1',
           required: true,
-          helper: 'Use 1 para uma conta única, ou informe quantas parcelas mensais deseja.',
+          helper: kind == 'payable'
+              ? 'Informe quantas vezes a despesa deve aparecer.'
+              : 'Use 1 para uma conta única, ou informe quantas parcelas mensais deseja.',
+          visibleWhenKey: 'repeatMode',
+          visibleWhenValues: const {
+            'monthly',
+            'monthly_repeat',
+            'weekly',
+            'custom',
+          },
+        ),
+        FormFieldSpec(
+          'intervalDays',
+          'Intervalo em dias',
+          initial: '15',
+          required: true,
+          visibleWhenKey: 'repeatMode',
+          visibleWhenValues: const {'custom'},
+          helper: 'Ex.: 15 para repetir a cada quinze dias.',
         ),
         FormFieldSpec(
           'notes',
@@ -2622,13 +3480,34 @@ class _WorkspaceState extends State<Workspace> {
         ),
       ],
       (v) async {
-        final installmentCount = int.tryParse(v['installments']!) ?? 0;
-        final totalAmount = parseMoney(v['amount']!);
+        final repeatMode = v['repeatMode'] ?? 'single';
+        final installmentCount = repeatMode == 'single'
+            ? 1
+            : int.tryParse(v['installments']!) ?? 0;
+        final enteredAmount = parseMoney(v['amount']!);
+        final repeating =
+            repeatMode == 'weekly' ||
+            repeatMode == 'monthly_repeat' ||
+            repeatMode == 'custom';
+        final intervalDays = repeatMode == 'weekly'
+            ? 7
+            : repeatMode == 'custom'
+            ? int.tryParse(v['intervalDays'] ?? '') ?? 0
+            : 0;
+        if (repeatMode == 'custom' &&
+            (intervalDays < 1 || intervalDays > 365)) {
+          throw Exception('Informe um intervalo entre 1 e 365 dias.');
+        }
+        final totalAmount = repeating
+            ? enteredAmount * installmentCount
+            : enteredAmount;
         final schedule = installmentCount > 1
             ? await installmentSchedule(
                 totalAmount,
                 installmentCount,
                 v['due']!,
+                intervalDays: intervalDays,
+                repeatedAmount: repeating ? enteredAmount : null,
               )
             : null;
         if (installmentCount > 1 && schedule == null) {
@@ -2655,6 +3534,47 @@ class _WorkspaceState extends State<Workspace> {
             partyId = created['id'];
           }
         }
+        final possibleDuplicate = titles.any(
+          (item) =>
+              item['kind'] == kind &&
+              '${item['description']}'
+                      .replaceFirst(RegExp(r' \(\d+/\d+\)$'), '')
+                      .toUpperCase() ==
+                  v['description']!.trim().toUpperCase() &&
+              item['amount'] ==
+                  (repeating
+                      ? enteredAmount
+                      : installmentCount > 1
+                      ? schedule?.first['amount']
+                      : enteredAmount) &&
+              item['due'] == v['due'] &&
+              item['partyId'] == partyId &&
+              item['cancelled'] == 0,
+        );
+        if (possibleDuplicate && mounted) {
+          final continueSave = await showDialog<bool>(
+            context: context,
+            builder: (c) => AlertDialog(
+              title: const Text('Possível lançamento duplicado'),
+              content: const Text(
+                'Já existe uma conta com a mesma descrição, pessoa, valor e vencimento. Deseja criar outra mesmo assim?',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(c, false),
+                  child: const Text('Voltar'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.pop(c, true),
+                  child: const Text('Criar mesmo assim'),
+                ),
+              ],
+            ),
+          );
+          if (continueSave != true) {
+            throw Exception('Revise o lançamento antes de salvar.');
+          }
+        }
         await api.request(path, {
           'kind': kind,
           'description': v['description'],
@@ -2665,41 +3585,42 @@ class _WorkspaceState extends State<Workspace> {
           'notes': v['notes'],
           'documentNumber': v['documentNumber'],
           'issueDate': v['issueDate'],
-          'branch': v['branch'],
+          'branch': hasMatrixOrBranch ? v['branch'] : '',
           'costCenter': v['costCenter'],
+          'paymentMethodId': int.tryParse(v['paymentMethodId'] ?? ''),
           'installments': installmentCount,
           'installmentAmounts': schedule?.map((e) => e['amount']).toList(),
           'installmentDues': schedule?.map((e) => e['due']).toList(),
+          'installmentIntervalDays': intervalDays,
         });
       },
-      note: 'O valor total será dividido entre as parcelas. O saldo da conta só muda quando houver baixa.',
+      note: 'Você pode criar uma conta única, dividir o total ou repetir o mesmo valor mensalmente, semanalmente ou em um intervalo escolhido. O saldo só muda quando houver baixa.',
     );
   }
 
   Future<List<RecordData>?> installmentSchedule(
     int totalAmount,
     int count,
-    String firstDue,
-  ) async {
-    final first = DateTime.parse(firstDue);
-    final amounts = List.generate(
+    String firstDue, {
+    int intervalDays = 0,
+    int? repeatedAmount,
+  }) async {
+    final amountValues = scheduledAmounts(
+      repeatedAmount ?? totalAmount,
       count,
-      (i) => TextEditingController(
-        text: inputMoney(
-          totalAmount ~/ count + (i < totalAmount % count ? 1 : 0),
-        ),
-      ),
+      repeatEach: repeatedAmount != null,
     );
-    final dues = List.generate(count, (i) {
-      final month = DateTime(first.year, first.month + i, 1);
-      final lastDay = DateTime(month.year, month.month + 1, 0).day;
-      final due = DateTime(
-        month.year,
-        month.month,
-        first.day > lastDay ? lastDay : first.day,
-      );
-      return TextEditingController(text: dateLabel(iso(due)));
-    });
+    final dueValues = scheduledDues(
+      firstDue,
+      count,
+      intervalDays: intervalDays,
+    );
+    final amounts = amountValues
+        .map((value) => TextEditingController(text: inputMoney(value)))
+        .toList();
+    final dues = dueValues
+        .map((value) => TextEditingController(text: dateLabel(value)))
+        .toList();
     String? errorText;
     final result = await showDialog<List<RecordData>>(
       context: context,
@@ -2714,7 +3635,9 @@ class _WorkspaceState extends State<Workspace> {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 Text(
-                  'Valor total: ${money(totalAmount)}. Ajuste valores e vencimentos; a soma deve fechar o total.',
+                  intervalDays == 7
+                      ? '$count lançamentos de ${money(repeatedAmount!)} a cada 7 dias. Total: ${money(totalAmount)}. Você pode ajustar valores e vencimentos.'
+                      : 'Valor total: ${money(totalAmount)}. Ajuste valores e vencimentos; a soma deve fechar o total.',
                 ),
                 if (errorText != null)
                   Padding(
@@ -2850,6 +3773,21 @@ class _WorkspaceState extends State<Workspace> {
           initial: iso(DateTime.now()),
         ),
         FormFieldSpec(
+          'paymentMethodId',
+          t['kind'] == 'payable'
+              ? 'Forma de pagamento'
+              : 'Forma de recebimento',
+          initial: '${t['paymentMethodId'] ?? ''}',
+          options: [
+            const MapEntry('', 'Não informada'),
+            ...options(
+              paymentMethods
+                  .where((m) => m['kind'] == 'both' || m['kind'] == t['kind'])
+                  .toList(),
+            ),
+          ],
+        ),
+        FormFieldSpec(
           'interest',
           'Juros (R\$)',
           initial: inputMoney(suggested('interestRate')),
@@ -2870,6 +3808,13 @@ class _WorkspaceState extends State<Workspace> {
           money: true,
           advanced: true,
         ),
+        FormFieldSpec(
+          'additional',
+          'Outros acréscimos (R\$)',
+          initial: '0,00',
+          money: true,
+          advanced: true,
+        ),
       ],
       (v) async {
         await api.request(path, {
@@ -2878,11 +3823,81 @@ class _WorkspaceState extends State<Workspace> {
           'interest': parseMoney(v['interest']!),
           'penalty': parseMoney(v['penalty']!),
           'discount': parseMoney(v['discount']!),
+          'additional': parseMoney(v['additional']!),
+          'paymentMethodId': int.tryParse(v['paymentMethodId'] ?? ''),
           'date': v['date'],
         });
       },
       note:
-          '${t['description']} • Em aberto: ${money(t['remaining'])}\nMovimento no caixa = principal + juros + multa − desconto. Para baixa parcial, reduza o principal.',
+          '${t['description']} • Em aberto: ${money(t['remaining'])}\nMovimento no caixa = principal + juros + multa + outros acréscimos − desconto. Para baixa parcial, reduza o principal.',
+    );
+  }
+
+  void bulkSettleForm() {
+    final chosen = titles
+        .where(
+          (t) =>
+              selectedTitleIds.contains(t['id']) &&
+              t['cancelled'] == 0 &&
+              t['remaining'] > 0,
+        )
+        .toList();
+    if (chosen.length < 2) {
+      message('Selecione pelo menos dois lançamentos em aberto.');
+      return;
+    }
+    final kind = chosen.first['kind'];
+    if (chosen.any((t) => t['kind'] != kind)) {
+      message('Selecione somente contas do mesmo tipo.');
+      return;
+    }
+    final totalValue = total(chosen, 'remaining');
+    form(
+      kind == 'payable'
+          ? 'Pagar títulos selecionados'
+          : 'Receber títulos selecionados',
+      [
+        FormFieldSpec(
+          'accountId',
+          'Conta financeira',
+          required: true,
+          options: options(accounts),
+          initial: '${accounts.first['id']}',
+        ),
+        FormFieldSpec(
+          'date',
+          'Data da baixa',
+          date: true,
+          required: true,
+          pastOnly: true,
+          initial: iso(DateTime.now()),
+        ),
+        FormFieldSpec(
+          'paymentMethodId',
+          kind == 'payable' ? 'Forma de pagamento' : 'Forma de recebimento',
+          initial: '',
+          options: [
+            const MapEntry('', 'Não informada'),
+            ...options(
+              paymentMethods
+                  .where((m) => m['kind'] == 'both' || m['kind'] == kind)
+                  .toList(),
+            ),
+          ],
+        ),
+      ],
+      (v) async {
+        await api.request('$base/settlements/bulk', {
+          'accountId': int.parse(v['accountId']!),
+          'date': v['date'],
+          'paymentMethodId': int.tryParse(v['paymentMethodId'] ?? ''),
+          'items': chosen
+              .map((t) => {'titleId': t['id'], 'principal': t['remaining']})
+              .toList(),
+        });
+      },
+      note:
+          '${chosen.length} lançamentos serão baixados integralmente. Total conferido: ${money(totalValue)}. A operação será gravada individualmente em cada título.',
     );
   }
 
@@ -2908,6 +3923,16 @@ class _WorkspaceState extends State<Workspace> {
           'Nome da pessoa ou empresa',
           initial: party?['name'] ?? '',
           hint: 'Ex.: Ana Silva ou Papelaria Central',
+        ),
+        FormFieldSpec(
+          'personType',
+          'Pessoa física ou jurídica',
+          initial: party?['personType'] ?? '',
+          options: const [
+            MapEntry('', 'IDENTIFICAR PELO DOCUMENTO'),
+            MapEntry('individual', 'PESSOA FÍSICA'),
+            MapEntry('company', 'PESSOA JURÍDICA'),
+          ],
         ),
         FormFieldSpec(
           'type',
@@ -2954,6 +3979,12 @@ class _WorkspaceState extends State<Workspace> {
   }
 
   void planForm([RecordData? plan]) {
+    if (!canManagePlanRates) {
+      message(
+        'O ADMINISTRADOR DA EMPRESA BLOQUEOU A ALTERAÇÃO DE JUROS, MULTA E DESCONTO.',
+      );
+      return;
+    }
     form(
       plan == null ? 'Novo plano de contas' : 'Editar plano de contas',
       [
@@ -2996,21 +4027,34 @@ class _WorkspaceState extends State<Workspace> {
     );
   }
 
-  void accountForm() {
-    final path = '$base/accounts';
+  void accountForm([RecordData? account]) {
+    final path = account == null
+        ? '$base/accounts'
+        : '$base/accounts/${account['id']}/edit';
     form(
-      'Nova conta financeira',
+      account == null ? 'Nova conta financeira' : 'Editar conta financeira',
       [
         FormFieldSpec(
           'name',
           'Como você quer chamar esta conta?',
+          initial: account?['name'] ?? '',
           required: true,
           hint: 'Ex.: Caixa da loja ou Banco principal',
         ),
         FormFieldSpec(
+          'type',
+          'Tipo da conta',
+          initial: account?['type'] ?? 'cash',
+          options: const [
+            MapEntry('cash', 'CAIXA'),
+            MapEntry('bank', 'BANCO'),
+            MapEntry('wallet', 'CARTEIRA / OUTROS'),
+          ],
+        ),
+        FormFieldSpec(
           'opening',
           'Saldo inicial (R\$)',
-          initial: '0,00',
+          initial: inputMoney(account?['opening'] ?? 0),
           money: true,
           helper: 'Quanto já existe nesta conta antes dos lançamentos? Se estiver vazia, deixe zero.',
         ),
@@ -3019,8 +4063,103 @@ class _WorkspaceState extends State<Workspace> {
         await api.request(path, {
           'name': v['name'],
           'opening': parseMoney(v['opening']!),
+          'type': v['type'],
         });
       },
+    );
+  }
+
+  void paymentMethodForm([RecordData? item]) {
+    form(
+      item == null
+          ? 'Nova forma de pagamento ou recebimento'
+          : 'Editar forma de pagamento ou recebimento',
+      [
+        FormFieldSpec(
+          'name',
+          'Nome',
+          initial: item?['name'] ?? '',
+          required: true,
+          hint: 'Ex.: PIX, BOLETO OU CARTÃO',
+        ),
+        FormFieldSpec(
+          'kind',
+          'Disponível em',
+          initial: item?['kind'] ?? 'both',
+          options: const [
+            MapEntry('both', 'PAGAMENTOS E RECEBIMENTOS'),
+            MapEntry('payable', 'SOMENTE PAGAMENTOS'),
+            MapEntry('receivable', 'SOMENTE RECEBIMENTOS'),
+          ],
+        ),
+      ],
+      (v) => api.request(
+        item == null
+            ? '$base/payment-methods'
+            : '$base/payment-methods/${item['id']}/edit',
+        v,
+      ),
+    );
+  }
+
+  void costCenterForm([RecordData? item]) {
+    if (financialUser) {
+      message('O USUÁRIO FINANCEIRO NÃO PODE ADMINISTRAR CENTROS DE CUSTO.');
+      return;
+    }
+    form(
+      item == null ? 'Novo centro de custo' : 'Editar centro de custo',
+      [
+        FormFieldSpec(
+          'name',
+          'Nome do setor ou atividade',
+          initial: item?['name'] ?? '',
+          required: true,
+          hint: 'Ex.: PADARIA OU ADMINISTRAÇÃO',
+        ),
+      ],
+      (v) => api.request(
+        item == null
+            ? '$base/cost-centers'
+            : '$base/cost-centers/${item['id']}/edit',
+        v,
+      ),
+    );
+  }
+
+  void adjustmentForm(RecordData account) {
+    form(
+      'Ajustar saldo de ${account['name']}',
+      [
+        FormFieldSpec(
+          'amount',
+          'Valor do ajuste (R\$)',
+          required: true,
+          money: true,
+          helper:
+              'Use valor positivo para acrescentar e negativo para retirar.',
+        ),
+        FormFieldSpec(
+          'date',
+          'Data',
+          required: true,
+          date: true,
+          pastOnly: true,
+          initial: iso(DateTime.now()),
+        ),
+        FormFieldSpec(
+          'reason',
+          'Justificativa',
+          required: true,
+          hint: 'Ex.: correção após conferência de caixa',
+        ),
+      ],
+      (v) => api.request('$base/accounts/${account['id']}/adjust', {
+        'amount': parseMoney(v['amount']!),
+        'date': v['date'],
+        'reason': v['reason'],
+      }),
+      note: 'O ajuste movimenta somente esta conta e ficará identificado no histórico.',
     );
   }
 
@@ -3107,6 +4246,10 @@ class _WorkspaceState extends State<Workspace> {
   }
 
   Future<void> backup() async {
+    if (financialUser) {
+      message('O USUÁRIO FINANCEIRO NÃO PODE CRIAR BACKUP.');
+      return;
+    }
     try {
       final result = await api.request(
         '/api/backup'.replaceFirst('/api', ''),
@@ -3147,8 +4290,324 @@ class _WorkspaceState extends State<Workspace> {
     }
   }
 
+  void showBackupTools() {
+    if (financialUser) {
+      message('O USUÁRIO FINANCEIRO NÃO TEM ACESSO AO BACKUP.');
+      return;
+    }
+    showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.shield_outlined),
+            SizedBox(width: 10),
+            Text('Ferramentas de backup'),
+          ],
+        ),
+        content: const Text(
+          'Escolha a operação. A restauração fica disponível somente para o administrador geral.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Fechar'),
+          ),
+          FilledButton.icon(
+            onPressed: () {
+              Navigator.pop(dialogContext);
+              backup();
+            },
+            icon: const Icon(Icons.save_outlined),
+            label: const Text('Criar backup'),
+          ),
+          if (globalAdmin)
+            FilledButton.icon(
+              onPressed: () {
+                Navigator.pop(dialogContext);
+                restoreBackup();
+              },
+              icon: const Icon(Icons.restore_outlined),
+              label: const Text('Restaurar backup'),
+            ),
+          if (globalAdmin)
+            FilledButton.icon(
+              onPressed: () {
+                Navigator.pop(dialogContext);
+                recoverGestoresBackup();
+              },
+              icon: const Icon(Icons.sync_alt_outlined),
+              label: const Text('Recuperar backup do Gestores'),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> recoverGestoresBackup() async {
+    final file = await openFile(
+      acceptedTypeGroups: const [
+        XTypeGroup(label: 'Backup do Gestores', extensions: ['zip', 'backup']),
+      ],
+    );
+    if (file == null || !mounted) return;
+    final passwordController = TextEditingController();
+    if (file.name.toLowerCase().endsWith('.zip')) {
+      final proceed = await showDialog<bool>(
+        context: context,
+        builder: (c) => AlertDialog(
+          title: const Text('Abrir backup do Gestores'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Se este ZIP foi criado nesta máquina, deixe a senha em branco. Se veio de outra máquina, informe a senha usada para proteger o backup.',
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: passwordController,
+                obscureText: true,
+                decoration: const InputDecoration(
+                  labelText: 'Senha do backup (opcional)',
+                  prefixIcon: Icon(Icons.lock_outline),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(c, false),
+              child: const Text('Voltar'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(c, true),
+              child: const Text('Conferir backup'),
+            ),
+          ],
+        ),
+      );
+      if (proceed != true) {
+        passwordController.dispose();
+        return;
+      }
+    }
+    var progressOpen = false;
+    void showProgress(String text) {
+      progressOpen = true;
+      showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => AlertDialog(
+          content: Row(
+            children: [
+              const SizedBox(
+                width: 28,
+                height: 28,
+                child: CircularProgressIndicator(strokeWidth: 3),
+              ),
+              const SizedBox(width: 18),
+              Expanded(child: Text(text)),
+            ],
+          ),
+        ),
+      );
+    }
+
+    void closeProgress() {
+      if (progressOpen && mounted) {
+        Navigator.of(context, rootNavigator: true).pop();
+        progressOpen = false;
+      }
+    }
+
+    try {
+      final bytes = await file.readAsBytes();
+      showProgress(
+        'Lendo e conferindo o backup do Gestores. Isso pode levar alguns minutos.',
+      );
+      final preview = await api.request('/import/gestores/prepare', {
+        'name': file.name,
+        'dataBase64': base64Encode(bytes),
+        'password': passwordController.text,
+      });
+      closeProgress();
+      if (!mounted) return;
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (c) => AlertDialog(
+          title: const Text('Dados encontrados no Gestores'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '${preview['company']}',
+                  style: const TextStyle(fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 14),
+                Text('${preview['parties']} clientes e fornecedores'),
+                Text('${preview['plans']} planos de contas'),
+                Text('${preview['accounts']} contas financeiras'),
+                Text(
+                  '${preview['payables']} contas a pagar • ${money(preview['payablesTotal'])}',
+                ),
+                Text(
+                  '${preview['receivables']} contas a receber • ${money(preview['receivablesTotal'])}',
+                ),
+                Text(
+                  '${preview['settlements']} baixas • ${money(preview['settlementsTotal'])}',
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'Ao continuar, esses dados substituirão o financeiro atual. Antes disso, o Monalisa criará automaticamente uma cópia de segurança.',
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(c, false),
+              child: const Text('Cancelar'),
+            ),
+            FilledButton.icon(
+              onPressed: () => Navigator.pop(c, true),
+              icon: const Icon(Icons.restore_outlined),
+              label: const Text('Recuperar estes dados'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true) return;
+      showProgress('Criando a cópia de segurança e recuperando os dados.');
+      final result = await api.request('/import/gestores/commit', {
+        'token': preview['token'],
+      });
+      closeProgress();
+      await load();
+      message(
+        'Dados do Gestores recuperados. Cópia anterior salva em ${result['safetyBackup']}.',
+      );
+    } catch (e) {
+      closeProgress();
+      message(e.toString().replaceFirst('Exception: ', ''));
+    } finally {
+      passwordController.dispose();
+    }
+  }
+
+  Future<void> restoreBackup() async {
+    final file = await openFile(
+      acceptedTypeGroups: const [
+        XTypeGroup(label: 'Backup SQLite', extensions: ['db']),
+      ],
+    );
+    if (file == null || !mounted) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('Restaurar este backup?'),
+        content: Text(
+          'O arquivo “${file.name}” substituirá os dados atuais. Antes disso, o sistema criará automaticamente uma cópia de segurança do banco atual.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(c, false),
+            child: const Text('Voltar'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(c, true),
+            child: const Text('Restaurar'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      final bytes = await file.readAsBytes();
+      final result = await api.request('/restore', {
+        'name': file.name,
+        'dataBase64': base64Encode(bytes),
+      });
+      await load();
+      message(
+        'Backup restaurado. Cópia anterior salva em ${result['safetyBackup']}.',
+      );
+    } catch (e) {
+      message(e.toString().replaceFirst('Exception: ', ''));
+    }
+  }
+
+  Future<void> attachFile({int? titleId, int? settlementId}) async {
+    final file = await openFile();
+    if (file == null) return;
+    try {
+      final bytes = await file.readAsBytes();
+      if (bytes.length > 10 * 1024 * 1024) {
+        throw Exception('O anexo deve ter até 10 MB.');
+      }
+      await api.request('$base/attachments', {
+        'titleId': titleId,
+        'settlementId': settlementId,
+        'name': file.name,
+        'mimeType': file.mimeType ?? 'application/octet-stream',
+        'dataBase64': base64Encode(bytes),
+      });
+      await load();
+      message('Anexo salvo com sucesso.');
+    } catch (e) {
+      message(e.toString().replaceFirst('Exception: ', ''));
+    }
+  }
+
+  Future<void> saveAttachment(RecordData attachment) async {
+    try {
+      final response = await api.client.get(
+        Uri.parse(
+          '$serviceOrigin/api/companies/$company/attachments/${attachment['id']}',
+        ),
+        headers: {
+          if (api.token != null) 'Authorization': 'Bearer ${api.token}',
+        },
+      );
+      if (response.statusCode != 200) {
+        throw Exception('Não foi possível abrir o anexo.');
+      }
+      if (kIsWeb) {
+        await saveBrowserDownload(
+          response.bodyBytes,
+          attachment['name'],
+          attachment['mimeType'],
+        );
+        message('DOWNLOAD DO ANEXO INICIADO.');
+      } else {
+        final location = await getSaveLocation(
+          suggestedName: attachment['name'],
+        );
+        if (location == null) return;
+        await XFile.fromData(
+          response.bodyBytes,
+          mimeType: attachment['mimeType'],
+          name: attachment['name'],
+        ).saveTo(location.path);
+        message('Anexo salvo em ${location.path}.');
+      }
+    } catch (e) {
+      message(e.toString().replaceFirst('Exception: ', ''));
+    }
+  }
+
   Future<void> details(RecordData t) async {
     final history = settlements.where((s) => s['titleId'] == t['id']).toList();
+    final settlementIds = history.map((s) => s['id']).toSet();
+    final titleAttachments = attachments
+        .where(
+          (a) =>
+              a['titleId'] == t['id'] ||
+              settlementIds.contains(a['settlementId']),
+        )
+        .toList();
     final action = await showDialog<String>(
       context: context,
       builder: (c) => AlertDialog(
@@ -3163,6 +4622,34 @@ class _WorkspaceState extends State<Workspace> {
                 Text(
                   'Valor original: ${money(t['amount'])}\nEm aberto: ${money(t['remaining'])}\nPlano de contas: ${t['category']}${(t['documentNumber'] ?? '').toString().isEmpty ? '' : '\nDocumento: ${t['documentNumber']}'}${(t['issueDate'] ?? '').toString().isEmpty ? '' : '\nEmissão: ${dateLabel(t['issueDate'])}'}${(t['branch'] ?? '').toString().isEmpty ? '' : '\nFilial: ${t['branch']}'}${(t['costCenter'] ?? '').toString().isEmpty ? '' : '\nSetor: ${t['costCenter']}'}${(t['notes'] as String).trim().isEmpty ? '' : '\nObservações: ${t['notes']}'}',
                 ),
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    OutlinedButton.icon(
+                      onPressed: () => Navigator.pop(c, 'attach/title'),
+                      icon: const Icon(Icons.attach_file),
+                      label: const Text('Anexar documento'),
+                    ),
+                  ],
+                ),
+                if (titleAttachments.isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  ...titleAttachments.map(
+                    (a) => ListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      leading: const Icon(Icons.description_outlined),
+                      title: Text(a['name']),
+                      subtitle: Text(
+                        '${((a['size'] as num) / 1024).toStringAsFixed(1)} KB',
+                      ),
+                      trailing: IconButton(
+                        icon: const Icon(Icons.download_outlined),
+                        onPressed: () => saveAttachment(a),
+                      ),
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 20),
                 const Text(
                   'Histórico de baixas',
@@ -3182,13 +4669,23 @@ class _WorkspaceState extends State<Workspace> {
                     subtitle: Text(
                       '${s['accountName']} • caixa: ${money(s['principal'] + s['interest'] + s['penalty'] - s['discount'])}${s['reversed'] == 1 ? '\nEstornado: ${s['reason']}' : ''}',
                     ),
-                    trailing: s['reversed'] == 1
-                        ? null
-                        : TextButton(
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          tooltip: 'Anexar comprovante',
+                          icon: const Icon(Icons.attach_file),
+                          onPressed: () =>
+                              Navigator.pop(c, 'attach/settlement/${s['id']}'),
+                        ),
+                        if (s['reversed'] != 1)
+                          TextButton(
                             onPressed: () =>
                                 Navigator.pop(c, 'reverse/${s['id']}'),
                             child: const Text('Estornar'),
                           ),
+                      ],
+                    ),
                   ),
                 ),
               ],
@@ -3213,6 +4710,10 @@ class _WorkspaceState extends State<Workspace> {
               child: const Text('Cancelar título'),
             ),
           TextButton(
+            onPressed: () => Navigator.pop(c, 'duplicate'),
+            child: const Text('Duplicar'),
+          ),
+          TextButton(
             onPressed: () => Navigator.pop(c),
             child: const Text('Fechar'),
           ),
@@ -3220,6 +4721,32 @@ class _WorkspaceState extends State<Workspace> {
       ),
     );
     if (action == null || !mounted) return;
+    if (action == 'attach/title') {
+      await attachFile(titleId: t['id']);
+      return;
+    }
+    if (action.startsWith('attach/settlement/')) {
+      await attachFile(settlementId: int.parse(action.split('/').last));
+      return;
+    }
+    if (action == 'duplicate') {
+      form(
+        'Duplicar lançamento',
+        [
+          FormFieldSpec(
+            'due',
+            'Vencimento da cópia',
+            required: true,
+            date: true,
+            initial: t['due'],
+          ),
+        ],
+        (v) async =>
+            api.request('$base/titles/${t['id']}/duplicate', {'due': v['due']}),
+        note: 'Será criada uma nova conta sem baixas e sem número de documento, preservando os demais dados.',
+      );
+      return;
+    }
     if (action == 'edit') {
       editTitleForm(t);
       return;
@@ -3349,15 +4876,53 @@ class _WorkspaceState extends State<Workspace> {
           'Plano de contas',
           initial: t['category'] ?? '',
         ),
+        if (hasMatrixOrBranch)
+          FormFieldSpec(
+            'branch',
+            'Matriz ou filial',
+            initial: (t['branch'] ?? '').toString().isEmpty
+                ? currentCompanyName
+                : '${t['branch']}',
+            required: true,
+            options: branchOptions('${t['branch'] ?? ''}'),
+          ),
+        financialUser
+            ? FormFieldSpec(
+                'costCenter',
+                'Setor ou centro de custo',
+                initial: t['costCenter'] ?? '',
+                options: [
+                  const MapEntry('', 'NÃO INFORMADO'),
+                  ...costCenters.map(
+                    (item) => MapEntry(
+                      item['name'] as String,
+                      item['name'] as String,
+                    ),
+                  ),
+                ],
+              )
+            : FormFieldSpec(
+                'costCenter',
+                'Setor ou centro de custo',
+                initial: t['costCenter'] ?? '',
+                suggestions: costCenters
+                    .map((item) => item['name'] as String)
+                    .toList(),
+              ),
         FormFieldSpec(
-          'branch',
-          'Filial ou unidade',
-          initial: t['branch'] ?? '',
-        ),
-        FormFieldSpec(
-          'costCenter',
-          'Setor ou centro de custo',
-          initial: t['costCenter'] ?? '',
+          'paymentMethodId',
+          t['kind'] == 'payable'
+              ? 'Forma de pagamento prevista'
+              : 'Forma de recebimento prevista',
+          initial: '${t['paymentMethodId'] ?? ''}',
+          options: [
+            const MapEntry('', 'NÃO INFORMADA'),
+            ...options(
+              paymentMethods
+                  .where((m) => m['kind'] == 'both' || m['kind'] == t['kind'])
+                  .toList(),
+            ),
+          ],
         ),
         FormFieldSpec('notes', 'Observações', initial: t['notes'] ?? ''),
         if (t['installmentGroup'] != null)
@@ -3383,8 +4948,9 @@ class _WorkspaceState extends State<Workspace> {
           'notes': v['notes'],
           'documentNumber': v['documentNumber'],
           'issueDate': v['issueDate'],
-          'branch': v['branch'],
+          'branch': hasMatrixOrBranch ? v['branch'] : t['branch'],
           'costCenter': v['costCenter'],
+          'paymentMethodId': int.tryParse(v['paymentMethodId'] ?? ''),
           'scope': v['scope'] ?? 'single',
         });
       },

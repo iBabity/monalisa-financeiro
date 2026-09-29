@@ -1,4 +1,4 @@
-param([string]$ApiDll = (Join-Path $PSScriptRoot 'api\bin\Debug\net10.0\Monalisa.Financeiro.dll'))
+param([string]$ApiDll = (Join-Path $PSScriptRoot 'api\bin\Debug\net10.0\Monalisa.Financeiro.Server.dll'))
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $testDir = Join-Path $root ('test-results\' + [Guid]::NewGuid().ToString('N'))

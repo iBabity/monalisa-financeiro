@@ -10,6 +10,8 @@ artifacts/
 tools/
 .private-support/
 .private-license/
+.tools/
+Monalisa-Financeiro-Setup.exe
 license-server/data/
 .vs/
 .idea/

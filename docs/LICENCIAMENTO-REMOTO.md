@@ -19,7 +19,7 @@
 
 Uma chave já vinculada não ativa outra máquina. Para uma troca de computador, o ADMIN usa **Trocar máquina** no Painel Central e autoriza uma nova ativação.
 
-Uma pessoa ou empresa pode possuir várias máquinas. Cada máquina exige uma licença própria, com chave, situação e bloqueio independentes. O cartão mostra **LIVRE** antes da primeira ativação e **EM USO** depois do vínculo. Se outra instalação tentar usar a mesma chave, o servidor recusa a ativação. A opção **Trocar computador** remove o vínculo atual para permitir uma nova ativação controlada.
+Uma pessoa ou empresa pode possuir várias máquinas. Cada máquina exige uma licença própria, com chave, situação e bloqueio independentes. O cartão mostra **LIVRE** quando a chave pode ser ativada em uma máquina e **EM USO** quando ela já está vinculada a uma instalação. Se outra instalação tentar usar a mesma chave, o servidor recusa a ativação. A opção **Desvincular máquina** remove o vínculo atual para permitir uma nova ativação controlada.
 
 Licenças antigas que foram criadas antes do armazenamento criptografado podem mostrar **Gerar chave** enquanto estiverem livres. A nova chave substitui a anterior e passa a permanecer disponível no cartão.
 

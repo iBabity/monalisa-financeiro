@@ -1,17 +1,24 @@
-# Monalisa Financeiro — primeira versão local
+# Monalisa Financeiro
+
+Versão atual: **1.1.13**.
 
 Aplicação independente para testar o ciclo financeiro com acesso por pessoa e empresa. Interface Flutter, API C#/.NET 10, SQLite. Identidade baseada na imagem fornecida e padrões de interface do Pedido de Compra. O projeto anterior não foi alterado; suas entidades de compras não são reutilizadas como entidades financeiras.
 
 ## Abrir
 
-Execute `Iniciar Monalisa.cmd`. O endereço é http://127.0.0.1:5187.
-O lançador abre o navegador e inicia a API em segundo plano quando necessário. A primeira versão é Flutter Web rodando localmente no Windows. O alvo Flutter Windows está presente, mas a compilação nativa exige Visual Studio com a carga Desktop development with C++, ausente nesta máquina.
+Execute `Iniciar Monalisa.cmd`. O Monalisa Financeiro abre como aplicativo nativo do Windows, em uma janela própria, sem navegador. A interface Flutter inicia o serviço C# local em segundo plano e o encerra quando a janela é fechada.
 
 O banco fica em `data/financeiro.db`. A empresa inicial é "Empresa de teste", com uma conta Caixa zerada. Não há lançamentos fictícios pré-carregados. Dados de testes automatizados ficam separados em `test-results`.
 
 No primeiro uso, a tela solicita a criação do administrador geral. O administrador geral enxerga todas as lojas, cria empresas e cria o administrador de cada empresa. Pessoas vinculadas a mais de um CNPJ escolhem a empresa depois do login.
 
 O usuário reservado `ADMIN` e a senha mestra diária funcionam somente no Painel Central Monalisa. O Financeiro instalado não possui acesso mestre nem permite ignorar um bloqueio remoto. Nele entram apenas os usuários cadastrados naquela instalação.
+
+## Instalador do Windows
+
+O instalador pronto fica em `artifacts\installer\Monalisa-Financeiro-Setup.exe`. Para gerar uma nova versão localmente, execute `.\installer\package-installer.ps1`.
+
+O pacote não inclui o banco de desenvolvimento nem uma chave de licença. Consulte `docs\INSTALACAO-E-ATIVACAO.md` para o fluxo de instalação, ativação, troca e bloqueio de máquinas.
 
 ## Implementado
 
@@ -53,7 +60,7 @@ Cada mutação financeira usa uma transação SQLite. As referências entre empr
 - Validação completa de documentos; nesta etapa CNPJ tem validação de comprimento, não de dígitos verificadores.
 - Empacotamento Windows nativo e instalador.
 
-O servidor fica restrito a 127.0.0.1 e rejeita origens externas de navegador. Não existem integrações bancárias nem movimentações de dinheiro real.
+O serviço interno fica restrito a 127.0.0.1 e não fica exposto para outros computadores. Não existem integrações bancárias nem movimentações de dinheiro real.
 
 ## Licenciamento remoto
 

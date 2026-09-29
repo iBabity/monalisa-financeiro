@@ -85,10 +85,11 @@ DateTime? parseFriendlyDate(String text) {
 
 class FormFieldSpec {
   final String keyName, label, initial;
-  final String? hint, helper, document;
+  final String? hint, helper, document, visibleWhenKey;
   final bool required, date, money, pastOnly, advanced, secret;
   final List<MapEntry<String, String>>? options;
   final List<String>? suggestions;
+  final Set<String>? visibleWhenValues;
   FormFieldSpec(
     this.keyName,
     this.label, {
@@ -101,6 +102,8 @@ class FormFieldSpec {
     this.hint,
     this.helper,
     this.document,
+    this.visibleWhenKey,
+    this.visibleWhenValues,
     this.pastOnly = false,
     this.advanced = false,
     this.secret = false,
@@ -413,9 +416,15 @@ class _EntryDialogState extends State<EntryDialog> {
   String? preview() {
     try {
       if (controllers.containsKey('installments')) {
+        final repeatMode = controllers['repeatMode']?.text ?? 'monthly';
         final count = int.tryParse(controllers['installments']!.text) ?? 0;
         final amount = parseMoney(controllers['amount']!.text);
-        if (count < 1 || count > 120 || amount < count) return null;
+        if (repeatMode == 'single') return 'Uma conta de ${money(amount)}.';
+        if (count < 1 || count > 120 || amount <= 0) return null;
+        if (repeatMode == 'weekly') {
+          return '$count lançamentos de ${money(amount)} a cada 7 dias. Total gerado: ${money(amount * count)}.';
+        }
+        if (amount < count) return null;
         final base = amount ~/ count, remainder = amount % count;
         return count == 1
             ? 'Uma conta de ${money(amount)}.'
@@ -433,6 +442,12 @@ class _EntryDialogState extends State<EntryDialog> {
       return null;
     }
     return null;
+  }
+
+  bool visible(FormFieldSpec field) {
+    if (field.visibleWhenKey == null) return true;
+    final value = controllers[field.visibleWhenKey]?.text ?? '';
+    return field.visibleWhenValues?.contains(value) ?? false;
   }
 
   @override
@@ -499,7 +514,8 @@ class _EntryDialogState extends State<EntryDialog> {
                       ),
                     ),
                   for (var i = 0; i < widget.fields.length; i++)
-                    if (!widget.fields[i].advanced || showAdvanced)
+                    if (visible(widget.fields[i]) &&
+                        (!widget.fields[i].advanced || showAdvanced))
                       Padding(
                         padding: const EdgeInsets.only(bottom: 22),
                         child: field(widget.fields[i], i),

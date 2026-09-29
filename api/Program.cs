@@ -1,5 +1,6 @@
 using Microsoft.Data.Sqlite;
 using System.Globalization;
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -7,10 +8,20 @@ using System.Text.RegularExpressions;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.UseUrls(Environment.GetEnvironmentVariable("FINANCE_URL") ?? "http://127.0.0.1:5187");
+builder.WebHost.ConfigureKestrel(options=>options.Limits.MaxRequestBodySize=700L*1024*1024);
 builder.Services.AddSingleton<Ledger>();
 builder.Services.AddSingleton<AuthSessions>();
 builder.Services.AddSingleton<LicenseGuard>();
 var app = builder.Build();
+var networkRole=(Environment.GetEnvironmentVariable("MONALISA_NETWORK_ROLE")??"standalone").Trim().ToLowerInvariant();
+var dataServerUrl=(Environment.GetEnvironmentVariable("MONALISA_DATA_SERVER_URL")??"").Trim().TrimEnd('/');
+var networkKey=(Environment.GetEnvironmentVariable("MONALISA_NETWORK_KEY")??"").Trim();
+var sharedPort=int.TryParse(Environment.GetEnvironmentVariable("MONALISA_NETWORK_SHARED_PORT"),out var configuredSharedPort)?configuredSharedPort:5188;
+var clientMode=networkRole=="client"&&Uri.TryCreate(dataServerUrl,UriKind.Absolute,out _)&&networkKey.Length>=24;
+var serverMode=networkRole=="server"&&networkKey.Length>=24;
+var proxyClient=new HttpClient(new SocketsHttpHandler { AllowAutoRedirect=false,UseCookies=false }) { Timeout=TimeSpan.FromMinutes(12) };
+app.UseDefaultFiles();
+app.UseStaticFiles();
 app.Use(async (ctx, next) => {
     var origin = ctx.Request.Headers.Origin.ToString();
     var localOrigin=$"{ctx.Request.Scheme}://{ctx.Request.Host}";
@@ -19,9 +30,16 @@ app.Use(async (ctx, next) => {
     catch (ArgumentException ex) { ctx.Response.StatusCode = 400; await ctx.Response.WriteAsJsonAsync(new { error = ex.Message }); }
     catch (SqliteException ex) when (ex.SqliteErrorCode == 19) { ctx.Response.StatusCode = 409; await ctx.Response.WriteAsJsonAsync(new { error = "Registro duplicado ou referência inválida." }); }
 });
+app.Use(async(ctx,next)=>{
+    if(!serverMode||ctx.Connection.LocalPort!=sharedPort||!ctx.Request.Path.StartsWithSegments("/api")){await next();return;}
+    var supplied=ctx.Request.Headers["X-Monalisa-Network-Key"].ToString();
+    if(!FixedTimeTextEquals(supplied,networkKey)){ctx.Response.StatusCode=401;await ctx.Response.WriteAsJsonAsync(new{error="ESTA MÁQUINA NÃO ESTÁ AUTORIZADA A USAR OS DADOS COMPARTILHADOS."});return;}
+    await next();
+});
 app.Use(async (ctx, next) => {
     if(!ctx.Request.Path.StartsWithSegments("/api") || ctx.Request.Path.StartsWithSegments("/api/health") ||
        ctx.Request.Path.StartsWithSegments("/api/license") || ctx.Request.Path.StartsWithSegments("/api/auth/bootstrap") || ctx.Request.Path.StartsWithSegments("/api/auth/login")) { await next(); return; }
+    if(clientMode){await next();return;}
     var db=ctx.RequestServices.GetRequiredService<Ledger>();
     if(Environment.GetEnvironmentVariable("FINANCE_AUTH_DISABLED")=="1") { await next(); return; }
     var needsSetup=!db.HasUsers();
@@ -48,30 +66,38 @@ app.Use(async (ctx, next) => {
        int.TryParse(match.Groups[1].Value,out var accessCompanyId) && !db.CanManageCompanyAccess(identity,accessCompanyId)) {
         ctx.Response.StatusCode=403;await ctx.Response.WriteAsJsonAsync(new{error="Este perfil não possui acesso à administração da empresa."});return;
     }
+    if(ctx.Request.Method=="POST" && ctx.Request.Path=="/api/backup" && !db.HasAdministrativeAccess(identity)) {
+        ctx.Response.StatusCode=403;await ctx.Response.WriteAsJsonAsync(new{error="O usuário financeiro não possui permissão para criar backup."});return;
+    }
+    if(match.Success && int.TryParse(match.Groups[1].Value,out var protectedCompanyId) && db.IsFinancialUser(identity,protectedCompanyId)) {
+        var path=ctx.Request.Path.Value??"";
+        if(ctx.Request.Method=="POST" && Regex.IsMatch(path,@"^/api/companies/\d+/cost-centers(?:/|$)")) {
+            ctx.Response.StatusCode=403;await ctx.Response.WriteAsJsonAsync(new{error="O usuário financeiro não possui permissão para administrar centros de custo."});return;
+        }
+        if(ctx.Request.Method=="POST" && Regex.IsMatch(path,@"^/api/companies/\d+/plans(?:/|$)") && !db.CanManagePlanRates(identity,protectedCompanyId)) {
+            ctx.Response.StatusCode=403;await ctx.Response.WriteAsJsonAsync(new{error="O administrador da empresa bloqueou a alteração de juros, multa e desconto dos planos de contas."});return;
+        }
+    }
     await next();
 });
 app.Use(async(ctx,next)=>{
     if(!ctx.Request.Path.StartsWithSegments("/api")||ctx.Request.Path.StartsWithSegments("/api/health")||ctx.Request.Path.StartsWithSegments("/api/license")||ctx.Request.Path.StartsWithSegments("/api/auth")){await next();return;}
     var license=await ctx.RequestServices.GetRequiredService<LicenseGuard>().Status();
+    if(!clientMode)ctx.RequestServices.GetRequiredService<Ledger>().ApplyLicensedCompany(license);
     if(license.Status=="blocked"||license.Status=="activation_required"){ctx.Response.StatusCode=423;await ctx.Response.WriteAsJsonAsync(new{error=license.Message,code="LICENSE_BLOCKED",license});return;}
     var allowedReadOnly=ctx.Request.Path.StartsWithSegments("/api/auth")||ctx.Request.Path=="/api/backup";
     if(license.Status=="read_only"&&ctx.Request.Method!="GET"&&!allowedReadOnly){ctx.Response.StatusCode=423;await ctx.Response.WriteAsJsonAsync(new{error=license.Message.Length>0?license.Message:"Licença em modo somente consulta.",code="LICENSE_READ_ONLY",license});return;}
     ctx.Items["license"]=license;await next();
 });
-app.UseDefaultFiles();
-app.UseStaticFiles(new StaticFileOptions
-{
-    OnPrepareResponse = context =>
-    {
-        context.Context.Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
-        context.Context.Response.Headers.Pragma = "no-cache";
-        context.Context.Response.Headers.Expires = "0";
-    }
+app.Use(async(ctx,next)=>{
+    if(!clientMode||!ctx.Request.Path.StartsWithSegments("/api")||ctx.Request.Path.StartsWithSegments("/api/health")||ctx.Request.Path.StartsWithSegments("/api/license")){await next();return;}
+    await ProxyToDataServer(ctx,dataServerUrl,networkKey,proxyClient);
 });
-app.MapGet("/api/health", () => new { status = "ok", mode = "local-test" });
-app.MapGet("/api/license/status", async (LicenseGuard license) => await license.Status());
-app.MapPost("/api/license/activate", async (LicenseActivationInput x,LicenseGuard license) => await license.Activate(x.ActivationKey));
-app.MapPost("/api/license/refresh", async (LicenseGuard license) => await license.Status(true));
+app.MapGet("/api/health", () => new { status = "ok", mode = networkRole, sharedData = clientMode||serverMode, dataServer = clientMode?dataServerUrl:"" });
+app.MapGet("/api/license/status", async (LicenseGuard license,Ledger db) => {var result=await license.Status();db.ApplyLicensedCompany(result);return result;});
+app.MapPost("/api/license/activate", async (LicenseActivationInput x,LicenseGuard license,Ledger db) => {var result=await license.Activate(x.ActivationKey);db.ApplyLicensedCompany(result);return result;});
+app.MapPost("/api/license/change", async (LicenseActivationInput x,LicenseGuard license,Ledger db) => {var result=await license.Change(x.ActivationKey);db.ApplyLicensedCompany(result);return result;});
+app.MapPost("/api/license/refresh", async (LicenseGuard license,Ledger db) => {var result=await license.Status(true);db.ApplyLicensedCompany(result);return result;});
 app.MapGet("/api/auth/bootstrap", (Ledger db) => new { needsSetup=!db.HasUsers() });
 app.MapPost("/api/auth/bootstrap", (BootstrapInput x, Ledger db, AuthSessions sessions) => {
     var user=db.SetupAdministrator(x);var token=sessions.Create(user);return new {token,user=db.AccessContext(user)};
@@ -108,25 +134,71 @@ app.MapGet("/api/companies/{companyId:int}/reports/receivables", (int companyId,
     context.Response.Headers.ContentDisposition=$"inline; filename=\"{report.FileName}\"";
     return Results.File(report.Content,"application/pdf");
 });
+app.MapGet("/api/companies/{companyId:int}/reports/advanced", (int companyId,string type,string start,string end,int? partyId,int? accountId,HttpContext context,Ledger db) => {var report=db.AdvancedReport(companyId,type,start,end,partyId,accountId);context.Response.Headers.ContentDisposition=$"inline; filename=\"{report.FileName}\"";return Results.File(report.Content,"application/pdf");});
+app.MapGet("/api/companies/{companyId:int}/exports/csv", (int companyId,string type,string start,string end,int? partyId,int? accountId,HttpContext context,Ledger db) => {var file=db.ExportCsv(companyId,type,start,end,partyId,accountId);context.Response.Headers.ContentDisposition=$"attachment; filename=\"{file.FileName}\"";return Results.File(file.Content,"text/csv; charset=utf-8");});
 app.MapPost("/api/companies/{companyId:int}/parties", (int companyId, PartyInput x, Ledger db) => db.Party(companyId,x));
 app.MapPost("/api/companies/{companyId:int}/parties/{id:int}/edit", (int companyId,int id,PartyInput x,Ledger db) => db.EditParty(companyId,id,x));
 app.MapPost("/api/companies/{companyId:int}/parties/{id:int}/delete", (int companyId,int id,Ledger db) => db.DeleteParty(companyId,id));
 app.MapPost("/api/companies/{companyId:int}/accounts", (int companyId, AccountInput x, Ledger db) => db.Account(companyId,x));
+app.MapPost("/api/companies/{companyId:int}/accounts/{id:int}/edit", (int companyId,int id,AccountInput x,Ledger db) => db.EditAccount(companyId,id,x));
 app.MapPost("/api/companies/{companyId:int}/accounts/{id:int}/delete", (int companyId,int id,Ledger db) => db.DeleteAccount(companyId,id));
+app.MapPost("/api/companies/{companyId:int}/accounts/{id:int}/adjust", (int companyId,int id,AdjustmentInput x,Ledger db) => db.Adjust(companyId,id,x));
 app.MapPost("/api/companies/{companyId:int}/plans", (int companyId, PlanInput x, Ledger db) => db.Plan(companyId,x));
 app.MapPost("/api/companies/{companyId:int}/plans/{id:int}/edit", (int companyId,int id,PlanInput x,Ledger db) => db.EditPlan(companyId,id,x));
 app.MapPost("/api/companies/{companyId:int}/plans/{id:int}/delete", (int companyId,int id,Ledger db) => db.DeletePlan(companyId,id));
-app.MapPost("/api/companies/{companyId:int}/titles", (int companyId, TitleInput x, Ledger db) => db.Title(companyId,x));
+app.MapPost("/api/companies/{companyId:int}/payment-methods", (int companyId, NamedKindInput x, Ledger db) => db.PaymentMethod(companyId,x));
+app.MapPost("/api/companies/{companyId:int}/payment-methods/{id:int}/edit", (int companyId,int id,NamedKindInput x,Ledger db) => db.EditPaymentMethod(companyId,id,x));
+app.MapPost("/api/companies/{companyId:int}/payment-methods/{id:int}/delete", (int companyId,int id,Ledger db) => db.DeletePaymentMethod(companyId,id));
+app.MapPost("/api/companies/{companyId:int}/cost-centers", (int companyId,NamedInput x,Ledger db) => db.CostCenter(companyId,x));
+app.MapPost("/api/companies/{companyId:int}/cost-centers/{id:int}/edit", (int companyId,int id,NamedInput x,Ledger db) => db.EditCostCenter(companyId,id,x));
+app.MapPost("/api/companies/{companyId:int}/cost-centers/{id:int}/delete", (int companyId,int id,Ledger db) => db.DeleteCostCenter(companyId,id));
+app.MapPost("/api/companies/{companyId:int}/titles", (int companyId, TitleInput x,HttpContext context, Ledger db) => db.Title(companyId,x,context.Items["user"] as AuthIdentity));
+app.MapPost("/api/companies/{companyId:int}/titles/{id:int}/duplicate", (int companyId,int id,DuplicateInput x,Ledger db) => db.Duplicate(companyId,id,x));
 app.MapPost("/api/companies/{companyId:int}/titles/{id:int}/settle", (int companyId, int id, SettlementInput x, Ledger db) => db.Settle(companyId,id,x));
+app.MapPost("/api/companies/{companyId:int}/settlements/bulk", (int companyId,BulkSettlementInput x,Ledger db) => db.BulkSettle(companyId,x));
 app.MapPost("/api/companies/{companyId:int}/settlements/{id:int}/reverse", (int companyId, int id, ReasonInput x, Ledger db) => db.Reverse(companyId,id,x));
 app.MapPost("/api/companies/{companyId:int}/titles/{id:int}/cancel", (int companyId,int id,CancelInput x,Ledger db) => db.Cancel(companyId,id,x));
-app.MapPost("/api/companies/{companyId:int}/titles/{id:int}/edit", (int companyId,int id,EditTitleInput x,Ledger db) => db.Edit(companyId,id,x));
+app.MapPost("/api/companies/{companyId:int}/titles/{id:int}/edit", (int companyId,int id,EditTitleInput x,HttpContext context,Ledger db) => db.Edit(companyId,id,x,context.Items["user"] as AuthIdentity));
 app.MapPost("/api/companies/{companyId:int}/titles/{id:int}/delete", (int companyId,int id,DeleteInput x,Ledger db) => db.Delete(companyId,id,x));
 app.MapPost("/api/companies/{companyId:int}/transfers", (int companyId, TransferInput x, Ledger db) => db.Transfer(companyId,x));
+app.MapPost("/api/companies/{companyId:int}/attachments", (int companyId,AttachmentInput x,Ledger db) => db.AddAttachment(companyId,x));
+app.MapGet("/api/companies/{companyId:int}/attachments/{id:int}", (int companyId,int id,Ledger db) => {var file=db.Attachment(companyId,id);return Results.File(file.Content,file.MimeType,file.Name);});
+app.MapPost("/api/companies/{companyId:int}/attachments/{id:int}/delete", (int companyId,int id,Ledger db) => db.DeleteAttachment(companyId,id));
 app.MapPost("/api/backup", (Ledger db) => new { path = db.Backup() });
-app.MapFallbackToFile("index.html");
+app.MapPost("/api/restore", (RestoreInput x,HttpContext context,Ledger db) => db.Restore(x,CurrentUser(context)));
+app.MapPost("/api/import/gestores/prepare", (GestoresImportInput x,HttpContext context,Ledger db) => db.PrepareGestoresImport(x,CurrentUser(context)));
+app.MapPost("/api/import/gestores/commit", (GestoresImportCommitInput x,HttpContext context,Ledger db) => db.CommitGestoresImport(x,CurrentUser(context)));
 app.Services.GetRequiredService<Ledger>();
+app.MapFallbackToFile("index.html");
 app.Run();
+
+static bool FixedTimeTextEquals(string supplied,string expected) {
+    var left=Encoding.UTF8.GetBytes(supplied);var right=Encoding.UTF8.GetBytes(expected);
+    return left.Length==right.Length&&CryptographicOperations.FixedTimeEquals(left,right);
+}
+
+static async Task ProxyToDataServer(HttpContext context,string serverUrl,string networkKey,HttpClient client) {
+    var target=serverUrl+context.Request.Path+context.Request.QueryString;
+    using var request=new HttpRequestMessage(new HttpMethod(context.Request.Method),target);
+    var hasBody=context.Request.ContentLength>0||context.Request.Headers.TransferEncoding.Count>0;
+    if(hasBody)request.Content=new StreamContent(context.Request.Body);
+    foreach(var header in context.Request.Headers) {
+        if(header.Key.Equals("Host",StringComparison.OrdinalIgnoreCase)||header.Key.Equals("Content-Length",StringComparison.OrdinalIgnoreCase)||header.Key.Equals("Transfer-Encoding",StringComparison.OrdinalIgnoreCase)||header.Key.Equals("Connection",StringComparison.OrdinalIgnoreCase)||header.Key.Equals("X-Monalisa-Network-Key",StringComparison.OrdinalIgnoreCase))continue;
+        if(!request.Headers.TryAddWithoutValidation(header.Key,header.Value.ToArray())&&request.Content is not null)request.Content.Headers.TryAddWithoutValidation(header.Key,header.Value.ToArray());
+    }
+    request.Headers.TryAddWithoutValidation("X-Monalisa-Network-Key",networkKey);
+    try {
+        using var response=await client.SendAsync(request,HttpCompletionOption.ResponseHeadersRead,context.RequestAborted);
+        context.Response.StatusCode=(int)response.StatusCode;
+        foreach(var header in response.Headers)if(!header.Key.Equals("Transfer-Encoding",StringComparison.OrdinalIgnoreCase)&&!header.Key.Equals("Connection",StringComparison.OrdinalIgnoreCase))context.Response.Headers[header.Key]=header.Value.ToArray();
+        foreach(var header in response.Content.Headers)if(!header.Key.Equals("Transfer-Encoding",StringComparison.OrdinalIgnoreCase)&&!header.Key.Equals("Connection",StringComparison.OrdinalIgnoreCase))context.Response.Headers[header.Key]=header.Value.ToArray();
+        await response.Content.CopyToAsync(context.Response.Body,context.RequestAborted);
+    } catch(OperationCanceledException) when(!context.RequestAborted.IsCancellationRequested) {
+        context.Response.Clear();context.Response.StatusCode=504;await context.Response.WriteAsJsonAsync(new{error="A MÁQUINA PRINCIPAL DEMOROU PARA RESPONDER. VERIFIQUE SE ELA ESTÁ LIGADA E CONECTADA À REDE."});
+    } catch(HttpRequestException) {
+        context.Response.Clear();context.Response.StatusCode=503;await context.Response.WriteAsJsonAsync(new{error="NÃO FOI POSSÍVEL CONECTAR À MÁQUINA PRINCIPAL. VERIFIQUE SE ELA ESTÁ LIGADA E CONECTADA À REDE."});
+    }
+}
 
 static async Task<object> LookupCnpj(string input) {
     var cnpj=new string(input.Where(char.IsLetterOrDigit).ToArray()).ToUpperInvariant();
@@ -159,19 +231,29 @@ sealed class AuthSessions {
 record CompanyInput(string Name, string Cnpj);
 record BootstrapInput(string Name,string Username,string Pin);
 record LoginInput(string Username,string Pin);
-record UserAccessInput(string Name,string Username,string Pin,string Role="admin");
-record LinkUserInput(string Role="admin");
-record AccessUpdateInput(string Role="admin",bool Active=true);
-record PartyInput(string Name,string Document,string Type,string Phone="",string Email="");
-record AccountInput(string Name,long Opening);
+record UserAccessInput(string Name,string Username,string Pin,string Role="admin",bool CanManagePlanRates=false);
+record LinkUserInput(string Role="admin",bool CanManagePlanRates=false);
+record AccessUpdateInput(string Role="admin",bool Active=true,bool CanManagePlanRates=false);
+record PartyInput(string Name,string Document,string Type,string Phone="",string Email="",string PersonType="");
+record AccountInput(string Name,long Opening,string Type="cash");
 record PlanInput(string Name,decimal InterestRate=0,decimal PenaltyRate=0,decimal DiscountRate=0);
-record TitleInput(string Kind,string Description,long Amount,string Due,int? PartyId,string Category,string Notes,int Installments = 1,decimal InterestRate = 0,decimal PenaltyRate = 0,decimal DiscountRate = 0,long[]? InstallmentAmounts = null,string[]? InstallmentDues = null,string DocumentNumber = "",string IssueDate = "",string Branch = "",string CostCenter = "");
-record SettlementInput(int AccountId,long Principal,long Interest,long Penalty,long Discount,string Date);
+record NamedInput(string Name);
+record NamedKindInput(string Name,string Kind="both");
+record TitleInput(string Kind,string Description,long Amount,string Due,int? PartyId,string Category,string Notes,int Installments = 1,decimal InterestRate = 0,decimal PenaltyRate = 0,decimal DiscountRate = 0,long[]? InstallmentAmounts = null,string[]? InstallmentDues = null,string DocumentNumber = "",string IssueDate = "",string Branch = "",string CostCenter = "",int InstallmentIntervalDays = 0,int? PaymentMethodId=null);
+record SettlementInput(int AccountId,long Principal,long Interest,long Penalty,long Discount,string Date,long Additional=0,int? PaymentMethodId=null);
+record BulkSettlementItem(int TitleId,long Principal,long Interest=0,long Penalty=0,long Discount=0,long Additional=0);
+record BulkSettlementInput(int AccountId,string Date,BulkSettlementItem[] Items,int? PaymentMethodId=null);
 record ReasonInput(string Reason);
 record CancelInput(string Reason, string Scope = "single");
-record EditTitleInput(string Description,long Amount,string Due,int? PartyId,string Category,string Notes,string Scope = "single",string DocumentNumber = "",string IssueDate = "",string Branch = "",string CostCenter = "");
+record EditTitleInput(string Description,long Amount,string Due,int? PartyId,string Category,string Notes,string Scope = "single",string DocumentNumber = "",string IssueDate = "",string Branch = "",string CostCenter = "",int? PaymentMethodId=null);
 record DeleteInput(string Reason, string Scope = "single");
 record TransferInput(int FromId,int ToId,long Amount,string Date);
+record AdjustmentInput(long Amount,string Date,string Reason);
+record DuplicateInput(string Due="");
+record AttachmentInput(int? TitleId,int? SettlementId,string Name,string MimeType,string DataBase64);
+record RestoreInput(string Name,string DataBase64);
+record AttachmentFile(byte[] Content,string MimeType,string Name);
+record DownloadFile(byte[] Content,string FileName);
 
 sealed class Ledger {
     readonly string path;
@@ -251,7 +333,7 @@ sealed class Ledger {
         }
         Run(c,"CREATE INDEX IF NOT EXISTS ix_titles_installment_group ON titles(companyId,installmentGroup)");
         if (Query(c,"SELECT id FROM companies").Count == 0) {
-            Run(c,"INSERT INTO companies(name,cnpj) VALUES('EMPRESA DE TESTE','TESTE-LOCAL')");
+            Run(c,"INSERT INTO companies(name,cnpj) VALUES('EMPRESA AGUARDANDO ATIVAÇÃO','LICENCA-PENDENTE')");
             Run(c,"INSERT INTO accounts(companyId,name,opening) VALUES(1,'CAIXA',0)");
         }
         foreach(var company in Query(c,"SELECT id FROM companies")) SeedPlans(c,Convert.ToInt32(company["id"]));
@@ -286,6 +368,42 @@ sealed class Ledger {
                 PRAGMA user_version=10;
                 """);
         }
+        currentVersion=Convert.ToInt32(Query(c,"PRAGMA user_version")[0]["user_version"]);
+        if(currentVersion<11) {
+            if(Query(c,"SELECT id FROM companies LIMIT 1").Count>0)Backup();
+            Run(c,"""
+                CREATE TABLE IF NOT EXISTS payment_methods(
+                    id INTEGER PRIMARY KEY,companyId INTEGER NOT NULL REFERENCES companies(id),name TEXT NOT NULL,
+                    kind TEXT NOT NULL DEFAULT 'both' CHECK(kind IN ('both','payable','receivable')),
+                    UNIQUE(companyId,name));
+                CREATE TABLE IF NOT EXISTS cost_centers(
+                    id INTEGER PRIMARY KEY,companyId INTEGER NOT NULL REFERENCES companies(id),name TEXT NOT NULL,
+                    UNIQUE(companyId,name));
+                CREATE TABLE IF NOT EXISTS attachments(
+                    id INTEGER PRIMARY KEY,companyId INTEGER NOT NULL REFERENCES companies(id),
+                    titleId INTEGER REFERENCES titles(id),settlementId INTEGER REFERENCES settlements(id),
+                    name TEXT NOT NULL,mimeType TEXT NOT NULL,data BLOB NOT NULL,
+                    created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+                CREATE INDEX IF NOT EXISTS ix_attachments_title ON attachments(companyId,titleId);
+                CREATE INDEX IF NOT EXISTS ix_attachments_settlement ON attachments(companyId,settlementId);
+                PRAGMA user_version=11;
+                """);
+        }
+        if (!Query(c,"PRAGMA table_info(parties)").Any(r => (string)r["name"]! == "personType"))
+            Run(c,"ALTER TABLE parties ADD COLUMN personType TEXT NOT NULL DEFAULT ''");
+        if (!Query(c,"PRAGMA table_info(accounts)").Any(r => (string)r["name"]! == "type"))
+            Run(c,"ALTER TABLE accounts ADD COLUMN type TEXT NOT NULL DEFAULT 'cash'");
+        if (!Query(c,"PRAGMA table_info(titles)").Any(r => (string)r["name"]! == "paymentMethodId"))
+            Run(c,"ALTER TABLE titles ADD COLUMN paymentMethodId INTEGER REFERENCES payment_methods(id)");
+        if (!Query(c,"PRAGMA table_info(settlements)").Any(r => (string)r["name"]! == "additional"))
+            Run(c,"ALTER TABLE settlements ADD COLUMN additional INTEGER NOT NULL DEFAULT 0");
+        if (!Query(c,"PRAGMA table_info(user_companies)").Any(r => (string)r["name"]! == "canManagePlanRates")) {
+            if(Query(c,"SELECT id FROM companies LIMIT 1").Count>0)Backup();
+            Run(c,"ALTER TABLE user_companies ADD COLUMN canManagePlanRates INTEGER NOT NULL DEFAULT 0; PRAGMA user_version=12");
+        }
+        if (!Query(c,"PRAGMA table_info(settlements)").Any(r => (string)r["name"]! == "paymentMethodId"))
+            Run(c,"ALTER TABLE settlements ADD COLUMN paymentMethodId INTEGER REFERENCES payment_methods(id)");
+        foreach(var company in Query(c,"SELECT id FROM companies")) SeedAuxiliaries(c,Convert.ToInt32(company["id"]));
     }
     SqliteConnection Open() { var c = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource=path, ForeignKeys=true }.ToString()); c.Open(); return c; }
     static SqliteCommand Cmd(SqliteConnection c,string sql,params object?[] values) { var cmd=c.CreateCommand(); cmd.CommandText=sql; for(int i=0;i<values.Length;i++) cmd.Parameters.AddWithValue("@p"+i,values[i]??DBNull.Value); return cmd; }
@@ -303,8 +421,35 @@ sealed class Ledger {
     static string LinkedMovements(List<Dictionary<string,object?>> rows)=>string.Join(", ",rows.Select(row=>$"\"{row["description"]}\" ({Date((string)row["date"]!).ToString("dd/MM/yyyy")})"));
     static void Audit(SqliteConnection c,int company,string action,object detail)=>Run(c,"INSERT INTO audit(companyId,action,detail) VALUES(@p0,@p1,@p2)",company,action,JsonSerializer.Serialize(detail));
     static void SeedPlans(SqliteConnection c,int company) { foreach(var name in new[]{"DESPESAS GERAIS","FORNECEDORES","ALUGUEL E OCUPAÇÃO","IMPOSTOS E TAXAS","FOLHA DE PAGAMENTO","SERVIÇOS CONTRATADOS","RECEITAS DE VENDAS","RECEITAS DE SERVIÇOS"}) if(Query(c,"SELECT id FROM plans WHERE companyId=@p0 AND upper(name)=upper(@p1)",company,name).Count==0)Run(c,"INSERT INTO plans(companyId,name) VALUES(@p0,@p1)",company,name); }
+    static void SeedAuxiliaries(SqliteConnection c,int company) {
+        foreach(var item in new[]{("DINHEIRO","both"),("PIX","both"),("BOLETO","both"),("TRANSFERÊNCIA BANCÁRIA","both"),("CARTÃO DE DÉBITO","receivable"),("CARTÃO DE CRÉDITO","receivable")})
+            if(Query(c,"SELECT id FROM payment_methods WHERE companyId=@p0 AND upper(name)=upper(@p1)",company,item.Item1).Count==0)Run(c,"INSERT INTO payment_methods(companyId,name,kind) VALUES(@p0,@p1,@p2)",company,item.Item1,item.Item2);
+        foreach(var name in new[]{"ADMINISTRAÇÃO","ESTOQUE","AÇOUGUE","HORTIFRÚTI","PADARIA","FRENTE DE CAIXA","MANUTENÇÃO"})
+            if(Query(c,"SELECT id FROM cost_centers WHERE companyId=@p0 AND upper(name)=upper(@p1)",company,name).Count==0)Run(c,"INSERT INTO cost_centers(companyId,name) VALUES(@p0,@p1)",company,name);
+    }
     object Write(Func<SqliteConnection,object> operation) { lock(gate){using var c=Open();using var tx=c.BeginTransaction();var result=operation(c);tx.Commit();return result;} }
     public bool HasUsers(){lock(gate){using var c=Open();return Query(c,"SELECT id FROM users LIMIT 1").Count>0;}}
+    public void ApplyLicensedCompany(LicenseSnapshot license){
+        if(string.IsNullOrWhiteSpace(license.Company)||string.IsNullOrWhiteSpace(license.Cnpj))return;
+        lock(gate){
+            using var c=Open();using var tx=c.BeginTransaction();
+            var companies=Query(c,"SELECT id,name,cnpj FROM companies ORDER BY id");
+            if(companies.Count!=1)return;
+            var current=companies[0];var name=(current["name"]?.ToString()??"").Trim();var document=(current["cnpj"]?.ToString()??"").Trim();
+            var placeholder=string.Equals(name,"EMPRESA DE TESTE",StringComparison.OrdinalIgnoreCase)||
+                string.Equals(document,"TESTE-LOCAL",StringComparison.OrdinalIgnoreCase)||
+                string.Equals(name,"EMPRESA AGUARDANDO ATIVAÇÃO",StringComparison.OrdinalIgnoreCase)||
+                string.Equals(document,"LICENCA-PENDENTE",StringComparison.OrdinalIgnoreCase);
+            if(!placeholder)return;
+            var licensedName=Required(license.Company,"Empresa da licença");
+            var licensedDocument=new string(license.Cnpj.Where(char.IsLetterOrDigit).ToArray()).ToUpperInvariant();
+            if(licensedDocument.Length is not (11 or 14))throw new ArgumentException("O CPF ou CNPJ vinculado à licença é inválido.");
+            var id=Convert.ToInt32(Number(current,"id"));
+            Run(c,"UPDATE companies SET name=@p0,cnpj=@p1 WHERE id=@p2",licensedName,licensedDocument,id);
+            Audit(c,id,"Empresa vinculada à licença",new{name=licensedName,document=licensedDocument});
+            tx.Commit();
+        }
+    }
     static string Username(string? value){var username=Required(value,"Usuário").Replace(" ","");if(username.Length<3||username.Length>40||!Regex.IsMatch(username,@"^[A-Z0-9._-]+$"))throw new ArgumentException("Use de 3 a 40 caracteres no usuário: letras, números, ponto, traço ou sublinhado.");if(string.Equals(username,"ADMIN",StringComparison.OrdinalIgnoreCase))throw new ArgumentException("O usuário ADMIN é reservado ao Painel Central Monalisa.");return username;}
     static void ValidatePin(string? value){if(value is null||!Regex.IsMatch(value,@"^\d{6,12}$"))throw new ArgumentException("O PIN deve conter de 6 a 12 números.");}
     static (string Salt,string Hash) HashPin(string pin){var salt=RandomNumberGenerator.GetBytes(16);var hash=Rfc2898DeriveBytes.Pbkdf2(pin,salt,120000,HashAlgorithmName.SHA256,32);return(Convert.ToBase64String(salt),Convert.ToBase64String(hash));}
@@ -314,35 +459,54 @@ sealed class Ledger {
     public AuthIdentity Authenticate(LoginInput x){lock(gate){using var c=Open();var username=Username(x.Username);var rows=Query(c,"SELECT * FROM users WHERE username=@p0",username);if(rows.Count==0)throw new ArgumentException("Usuário ou PIN inválido.");var row=rows[0];if(Number(row,"active")==0)throw new ArgumentException("Este acesso está bloqueado.");if(DateTime.TryParse((string)row["lockedUntil"]!,CultureInfo.InvariantCulture,DateTimeStyles.RoundtripKind,out var locked)&&locked>DateTime.UtcNow)throw new ArgumentException("Acesso temporariamente bloqueado. Aguarde alguns minutos.");if(!CheckPin(x.Pin,(string)row["pinSalt"]!,(string)row["pinHash"]!)){var attempts=Convert.ToInt32(Number(row,"failedAttempts"))+1;var until=attempts>=5?DateTime.UtcNow.AddMinutes(5).ToString("O"):"";Run(c,"UPDATE users SET failedAttempts=@p0,lockedUntil=@p1 WHERE id=@p2",attempts>=5?0:attempts,until,row["id"]);throw new ArgumentException(attempts>=5?"Muitas tentativas. O acesso foi bloqueado por cinco minutos.":"Usuário ou PIN inválido.");}Run(c,"UPDATE users SET failedAttempts=0,lockedUntil='' WHERE id=@p0",row["id"]);Run(c,"INSERT INTO access_audit(actorUserId,action,detail) VALUES(@p0,'LOGIN',@p1)",row["id"],JsonSerializer.Serialize(new{usuario=username}));return Identity(row);}}
     public AuthIdentity? SessionUser(int id){lock(gate){using var c=Open();var rows=Query(c,"SELECT * FROM users WHERE id=@p0 AND active=1",id);return rows.Count==0?null:Identity(rows[0]);}}
     public bool CanAccessCompany(int userId,int companyId){lock(gate){using var c=Open();return Query(c,"SELECT id FROM users WHERE id=@p0 AND active=1 AND globalAdmin=1",userId).Count>0||Query(c,"SELECT userId FROM user_companies WHERE userId=@p0 AND companyId=@p1 AND active=1",userId,companyId).Count>0;}}
+    public bool IsFinancialUser(AuthIdentity actor,int companyId){lock(gate){if(actor.GlobalAdmin)return false;using var c=Open();return Query(c,"SELECT userId FROM user_companies WHERE userId=@p0 AND companyId=@p1 AND role='user' AND active=1",actor.Id,companyId).Count>0;}}
+    public bool HasAdministrativeAccess(AuthIdentity actor){lock(gate){if(actor.GlobalAdmin)return true;using var c=Open();return Query(c,"SELECT userId FROM user_companies WHERE userId=@p0 AND role='admin' AND active=1 LIMIT 1",actor.Id).Count>0;}}
+    public bool CanManagePlanRates(AuthIdentity actor,int companyId){lock(gate){if(actor.GlobalAdmin)return true;using var c=Open();var rows=Query(c,"SELECT role,canManagePlanRates FROM user_companies WHERE userId=@p0 AND companyId=@p1 AND active=1",actor.Id,companyId);return rows.Any(row=>string.Equals(row["role"] as string,"admin",StringComparison.Ordinal)||Number(row,"canManagePlanRates")==1);}}
     public bool CanManageCompanyAccess(AuthIdentity actor,int companyId){lock(gate){if(actor.GlobalAdmin)return true;using var c=Open();return Query(c,"SELECT userId FROM user_companies WHERE userId=@p0 AND companyId=@p1 AND role='admin' AND active=1",actor.Id,companyId).Count>0;}}
     public object Companies(AuthIdentity? user){lock(gate){using var c=Open();if(user is null||user.GlobalAdmin)return Query(c,"SELECT id,name,cnpj,'global' AS role FROM companies ORDER BY name");return Query(c,"SELECT c.id,c.name,c.cnpj,uc.role FROM companies c JOIN user_companies uc ON uc.companyId=c.id WHERE uc.userId=@p0 AND uc.active=1 ORDER BY c.name",user.Id);}}
     public object AccessContext(AuthIdentity actor){lock(gate){using var c=Open();var rows=Query(c,"SELECT * FROM users WHERE id=@p0 AND active=1",actor.Id);if(rows.Count==0)throw new ArgumentException("Acesso não encontrado.");var user=Identity(rows[0]);var companies=user.GlobalAdmin?Query(c,"SELECT id,name,cnpj,'global' AS role FROM companies ORDER BY name"):Query(c,"SELECT c.id,c.name,c.cnpj,uc.role FROM companies c JOIN user_companies uc ON uc.companyId=c.id WHERE uc.userId=@p0 AND uc.active=1 ORDER BY c.name",actor.Id);return new{id=user.Id,name=user.Name,username=user.Username,globalAdmin=user.GlobalAdmin,companies};}}
     public object AllUsers(AuthIdentity actor){lock(gate){if(!actor.GlobalAdmin)throw new ArgumentException("Somente o administrador geral pode consultar todos os acessos.");using var c=Open();return Query(c,"SELECT id,name,username,globalAdmin,active FROM users ORDER BY name");}}
     static void RequireCompanyAdmin(SqliteConnection c,int company,AuthIdentity actor){Company(c,company);if(actor.GlobalAdmin)return;var rows=Query(c,"SELECT role FROM user_companies WHERE userId=@p0 AND companyId=@p1 AND active=1",actor.Id,company);if(rows.Count==0||!string.Equals(rows[0]["role"] as string,"admin",StringComparison.Ordinal))throw new ArgumentException("Somente um administrador desta empresa pode gerenciar acessos.");}
-    public object CompanyUsers(int company,AuthIdentity actor){lock(gate){using var c=Open();RequireCompanyAdmin(c,company,actor);return Query(c,"SELECT u.id,u.name,u.username,u.active AS userActive,uc.role,uc.active FROM users u JOIN user_companies uc ON uc.userId=u.id WHERE uc.companyId=@p0 ORDER BY u.name",company);}}
-    public object CreateCompanyUser(int company,UserAccessInput x,AuthIdentity actor)=>Write(c=>{RequireCompanyAdmin(c,company,actor);var role=x.Role.ToLowerInvariant();if(role!="admin"&&role!="user")throw new ArgumentException("Tipo de acesso inválido.");if(role=="admin"&&!actor.GlobalAdmin)throw new ArgumentException("Somente o administrador geral pode criar outro administrador.");ValidatePin(x.Pin);var username=Username(x.Username);if(Query(c,"SELECT id FROM users WHERE username=@p0",username).Count>0)throw new ArgumentException("Este nome de usuário já está em uso.");var pin=HashPin(x.Pin);Run(c,"INSERT INTO users(name,username,pinSalt,pinHash) VALUES(@p0,@p1,@p2,@p3)",Required(x.Name,"Nome"),username,pin.Salt,pin.Hash);var id=Number(Query(c,"SELECT last_insert_rowid() AS id")[0],"id");Run(c,"INSERT INTO user_companies(userId,companyId,role) VALUES(@p0,@p1,@p2)",id,company,role);Run(c,"INSERT INTO access_audit(actorUserId,companyId,action,detail) VALUES(@p0,@p1,'CRIAÇÃO DE ACESSO',@p2)",actor.Id,company,JsonSerializer.Serialize(new{id,username,role}));return new{id};});
-    public object LinkCompanyUser(int company,int userId,LinkUserInput x,AuthIdentity actor)=>Write(c=>{if(!actor.GlobalAdmin)throw new ArgumentException("Somente o administrador geral pode vincular uma pessoa a outra empresa.");RequireCompanyAdmin(c,company,actor);var role=x.Role.ToLowerInvariant();if(role!="admin"&&role!="user")throw new ArgumentException("Tipo de acesso inválido.");var user=Query(c,"SELECT id,globalAdmin FROM users WHERE id=@p0 AND active=1",userId);if(user.Count==0)throw new ArgumentException("Usuário não encontrado.");if(Number(user[0],"globalAdmin")==1)throw new ArgumentException("O administrador geral já possui acesso a todas as empresas.");if(Query(c,"SELECT userId FROM user_companies WHERE userId=@p0 AND companyId=@p1",userId,company).Count>0)throw new ArgumentException("Esta pessoa já possui vínculo com a empresa.");Run(c,"INSERT INTO user_companies(userId,companyId,role) VALUES(@p0,@p1,@p2)",userId,company,role);Run(c,"INSERT INTO access_audit(actorUserId,companyId,action,detail) VALUES(@p0,@p1,'VÍNCULO DE ACESSO',@p2)",actor.Id,company,JsonSerializer.Serialize(new{userId,role}));return new{ok=true};});
-    public object UpdateCompanyUser(int company,int userId,AccessUpdateInput x,AuthIdentity actor)=>Write(c=>{RequireCompanyAdmin(c,company,actor);var role=x.Role.ToLowerInvariant();if(role!="admin"&&role!="user")throw new ArgumentException("Tipo de acesso inválido.");if((role=="admin"||userId==actor.Id)&&!actor.GlobalAdmin)throw new ArgumentException("Somente o administrador geral pode alterar este acesso.");if(Query(c,"SELECT userId FROM user_companies WHERE userId=@p0 AND companyId=@p1",userId,company).Count==0)throw new ArgumentException("Acesso não encontrado nesta empresa.");Run(c,"UPDATE user_companies SET role=@p0,active=@p1 WHERE userId=@p2 AND companyId=@p3",role,x.Active?1:0,userId,company);Run(c,"INSERT INTO access_audit(actorUserId,companyId,action,detail) VALUES(@p0,@p1,'ALTERAÇÃO DE ACESSO',@p2)",actor.Id,company,JsonSerializer.Serialize(new{userId,role,x.Active}));return new{ok=true};});
+    public object CompanyUsers(int company,AuthIdentity actor){lock(gate){using var c=Open();RequireCompanyAdmin(c,company,actor);return Query(c,"SELECT u.id,u.name,u.username,u.active AS userActive,uc.role,uc.active,uc.canManagePlanRates FROM users u JOIN user_companies uc ON uc.userId=u.id WHERE uc.companyId=@p0 ORDER BY u.name",company);}}
+    public object CreateCompanyUser(int company,UserAccessInput x,AuthIdentity actor)=>Write(c=>{RequireCompanyAdmin(c,company,actor);var role=x.Role.ToLowerInvariant();if(role!="admin"&&role!="user")throw new ArgumentException("Tipo de acesso inválido.");if(role=="admin"&&!actor.GlobalAdmin)throw new ArgumentException("Somente o administrador geral pode criar outro administrador.");ValidatePin(x.Pin);var username=Username(x.Username);if(Query(c,"SELECT id FROM users WHERE username=@p0",username).Count>0)throw new ArgumentException("Este nome de usuário já está em uso.");var pin=HashPin(x.Pin);Run(c,"INSERT INTO users(name,username,pinSalt,pinHash) VALUES(@p0,@p1,@p2,@p3)",Required(x.Name,"Nome"),username,pin.Salt,pin.Hash);var id=Number(Query(c,"SELECT last_insert_rowid() AS id")[0],"id");var canRates=role=="user"&&x.CanManagePlanRates?1:0;Run(c,"INSERT INTO user_companies(userId,companyId,role,canManagePlanRates) VALUES(@p0,@p1,@p2,@p3)",id,company,role,canRates);Run(c,"INSERT INTO access_audit(actorUserId,companyId,action,detail) VALUES(@p0,@p1,'CRIAÇÃO DE ACESSO',@p2)",actor.Id,company,JsonSerializer.Serialize(new{id,username,role,canManagePlanRates=canRates==1}));return new{id};});
+    public object LinkCompanyUser(int company,int userId,LinkUserInput x,AuthIdentity actor)=>Write(c=>{if(!actor.GlobalAdmin)throw new ArgumentException("Somente o administrador geral pode vincular uma pessoa a outra empresa.");RequireCompanyAdmin(c,company,actor);var role=x.Role.ToLowerInvariant();if(role!="admin"&&role!="user")throw new ArgumentException("Tipo de acesso inválido.");var user=Query(c,"SELECT id,globalAdmin FROM users WHERE id=@p0 AND active=1",userId);if(user.Count==0)throw new ArgumentException("Usuário não encontrado.");if(Number(user[0],"globalAdmin")==1)throw new ArgumentException("O administrador geral já possui acesso a todas as empresas.");if(Query(c,"SELECT userId FROM user_companies WHERE userId=@p0 AND companyId=@p1",userId,company).Count>0)throw new ArgumentException("Esta pessoa já possui vínculo com a empresa.");var canRates=role=="user"&&x.CanManagePlanRates?1:0;Run(c,"INSERT INTO user_companies(userId,companyId,role,canManagePlanRates) VALUES(@p0,@p1,@p2,@p3)",userId,company,role,canRates);Run(c,"INSERT INTO access_audit(actorUserId,companyId,action,detail) VALUES(@p0,@p1,'VÍNCULO DE ACESSO',@p2)",actor.Id,company,JsonSerializer.Serialize(new{userId,role,canManagePlanRates=canRates==1}));return new{ok=true};});
+    public object UpdateCompanyUser(int company,int userId,AccessUpdateInput x,AuthIdentity actor)=>Write(c=>{RequireCompanyAdmin(c,company,actor);var role=x.Role.ToLowerInvariant();if(role!="admin"&&role!="user")throw new ArgumentException("Tipo de acesso inválido.");if((role=="admin"||userId==actor.Id)&&!actor.GlobalAdmin)throw new ArgumentException("Somente o administrador geral pode alterar este acesso.");if(Query(c,"SELECT userId FROM user_companies WHERE userId=@p0 AND companyId=@p1",userId,company).Count==0)throw new ArgumentException("Acesso não encontrado nesta empresa.");var canRates=role=="user"&&x.CanManagePlanRates?1:0;Run(c,"UPDATE user_companies SET role=@p0,active=@p1,canManagePlanRates=@p2 WHERE userId=@p3 AND companyId=@p4",role,x.Active?1:0,canRates,userId,company);Run(c,"INSERT INTO access_audit(actorUserId,companyId,action,detail) VALUES(@p0,@p1,'ALTERAÇÃO DE ACESSO',@p2)",actor.Id,company,JsonSerializer.Serialize(new{userId,role,x.Active,canManagePlanRates=canRates==1}));return new{ok=true};});
     public object CreateCompany(CompanyInput x) => Write(c=> {
         var name=Required(x.Name,"Nome");var cnpj=new string((x.Cnpj??"").Where(char.IsLetterOrDigit).ToArray()).ToUpperInvariant();
         if(cnpj.Length!=14)throw new ArgumentException("Informe o CNPJ com 14 caracteres.");
         Run(c,"INSERT INTO companies(name,cnpj) VALUES(@p0,@p1)",name,cnpj);
         var id=Number(Query(c,"SELECT last_insert_rowid() AS id")[0],"id");
-        Run(c,"INSERT INTO accounts(companyId,name,opening) VALUES(@p0,'Caixa',0)",id);SeedPlans(c,Convert.ToInt32(id));return new {id};
+        Run(c,"INSERT INTO accounts(companyId,name,opening,type) VALUES(@p0,'CAIXA',0,'cash')",id);SeedPlans(c,Convert.ToInt32(id));SeedAuxiliaries(c,Convert.ToInt32(id));return new {id};
     });
-    public object Party(int company,PartyInput x)=>Write(c=> { Company(c,company);ValidateParty(x);Run(c,"INSERT INTO parties(companyId,name,document,type,phone,email) VALUES(@p0,@p1,@p2,@p3,@p4,@p5)",company,Required(x.Name,"Nome"),x.Document??"",x.Type,x.Phone??"",x.Email??"");var id=Number(Query(c,"SELECT last_insert_rowid() AS id")[0],"id");Audit(c,company,"Cadastro de pessoa",x.Name);return new {ok=true,id}; });
-    static void ValidateParty(PartyInput x){if(x.Type!="customer"&&x.Type!="supplier"&&x.Type!="both")throw new ArgumentException("Tipo de pessoa inválido.");if(!string.IsNullOrWhiteSpace(x.Email)&&!x.Email.Contains('@'))throw new ArgumentException("Informe um e-mail válido.");}
-    public object EditParty(int company,int id,PartyInput x)=>Write(c=> {Existing(c,"parties",id,company);ValidateParty(x);Run(c,"UPDATE parties SET name=@p0,document=@p1,type=@p2,phone=@p3,email=@p4 WHERE id=@p5",Required(x.Name,"Nome"),x.Document??"",x.Type,x.Phone??"",x.Email??"",id);Audit(c,company,"Edição de pessoa",new{id,input=x});return new {ok=true};});
+    public object Party(int company,PartyInput x)=>Write(c=> { Company(c,company);var personType=ValidateParty(x);Run(c,"INSERT INTO parties(companyId,name,document,type,phone,email,personType) VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6)",company,Required(x.Name,"Nome"),CleanDocument(x.Document),x.Type,RequiredOrEmpty(x.Phone),RequiredOrEmpty(x.Email),personType);var id=Number(Query(c,"SELECT last_insert_rowid() AS id")[0],"id");Audit(c,company,"Cadastro de pessoa",x.Name);return new {ok=true,id}; });
+    static string CleanDocument(string? value)=>new string((value??"").Where(char.IsLetterOrDigit).ToArray()).ToUpperInvariant();
+    static string ValidateParty(PartyInput x){
+        if(x.Type!="customer"&&x.Type!="supplier"&&x.Type!="both")throw new ArgumentException("Tipo de pessoa inválido.");if(!string.IsNullOrWhiteSpace(x.Email)&&!x.Email.Contains('@'))throw new ArgumentException("Informe um e-mail válido.");
+        var document=CleanDocument(x.Document);var personType=(x.PersonType??"").Trim().ToLowerInvariant();if(personType.Length==0)personType=document.Length==11?"individual":document.Length==14?"company":"";
+        if(personType is not ("" or "individual" or "company"))throw new ArgumentException("Selecione pessoa física ou jurídica.");
+        if(document.Length>0&&personType=="individual"&&document.Length!=11)throw new ArgumentException("O CPF deve conter 11 números.");
+        if(document.Length>0&&personType=="company"&&document.Length!=14)throw new ArgumentException("O CNPJ deve conter 14 caracteres.");return personType;
+    }
+    public object EditParty(int company,int id,PartyInput x)=>Write(c=> {Existing(c,"parties",id,company);var personType=ValidateParty(x);Run(c,"UPDATE parties SET name=@p0,document=@p1,type=@p2,phone=@p3,email=@p4,personType=@p5 WHERE id=@p6",Required(x.Name,"Nome"),CleanDocument(x.Document),x.Type,RequiredOrEmpty(x.Phone),RequiredOrEmpty(x.Email),personType,id);Audit(c,company,"Edição de pessoa",new{id,input=x});return new {ok=true};});
     public object DeleteParty(int company,int id)=>Write(c=> {Existing(c,"parties",id,company);var linked=Query(c,"SELECT description,due FROM titles WHERE partyId=@p0 AND deleted=0 ORDER BY due,id LIMIT 5",id);if(linked.Count>0)throw new ArgumentException("Não foi possível excluir. Este cadastro está vinculado aos lançamentos: "+LinkedTitles(linked)+".");var name=(string)Query(c,"SELECT name FROM parties WHERE id=@p0",id)[0]["name"]!;Run(c,"UPDATE titles SET partyId=NULL WHERE partyId=@p0 AND deleted=1",id);Run(c,"DELETE FROM parties WHERE id=@p0",id);Audit(c,company,"Exclusão de pessoa",new{id,name});return new{ok=true};});
-    public object Account(int company,AccountInput x)=>Write(c=> {Company(c,company);if(x.Opening < -999999999999 || x.Opening > 999999999999)throw new ArgumentException("Saldo fora do limite.");Run(c,"INSERT INTO accounts(companyId,name,opening) VALUES(@p0,@p1,@p2)",company,Required(x.Name,"Nome"),x.Opening);Audit(c,company,"Cadastro de conta",x);return new {ok=true};});
+    static string AccountType(string? value){var type=(value??"cash").ToLowerInvariant();if(type is not ("cash" or "bank" or "wallet"))throw new ArgumentException("Tipo de conta inválido.");return type;}
+    public object Account(int company,AccountInput x)=>Write(c=> {Company(c,company);if(x.Opening < -999999999999 || x.Opening > 999999999999)throw new ArgumentException("Saldo fora do limite.");Run(c,"INSERT INTO accounts(companyId,name,opening,type) VALUES(@p0,@p1,@p2,@p3)",company,Required(x.Name,"Nome"),x.Opening,AccountType(x.Type));Audit(c,company,"Cadastro de conta",x);return new {ok=true};});
+    public object EditAccount(int company,int id,AccountInput x)=>Write(c=> {Existing(c,"accounts",id,company);if(x.Opening < -999999999999 || x.Opening > 999999999999)throw new ArgumentException("Saldo fora do limite.");Run(c,"UPDATE accounts SET name=@p0,opening=@p1,type=@p2 WHERE id=@p3",Required(x.Name,"Nome"),x.Opening,AccountType(x.Type),id);Audit(c,company,"Edição de conta",new{id,input=x});return new{ok=true};});
     public object DeleteAccount(int company,int id)=>Write(c=> {Existing(c,"accounts",id,company);var linked=Query(c,"SELECT description,date FROM movements WHERE accountId=@p0 ORDER BY date,id LIMIT 5",id);if(linked.Count>0)throw new ArgumentException("Não foi possível excluir. Esta conta está vinculada às movimentações: "+LinkedMovements(linked)+".");if(Query(c,"SELECT id FROM accounts WHERE companyId=@p0",company).Count<=1)throw new ArgumentException("Mantenha ao menos uma conta financeira para registrar as baixas.");var name=(string)Query(c,"SELECT name FROM accounts WHERE id=@p0",id)[0]["name"]!;Run(c,"DELETE FROM accounts WHERE id=@p0",id);Audit(c,company,"Exclusão de conta",new{id,name});return new{ok=true};});
     public object Plan(int company,PlanInput x)=>Write(c=> {Company(c,company);var rates=new[]{x.InterestRate,x.PenaltyRate,x.DiscountRate};if(rates.Any(v=>v<0||v>100))throw new ArgumentException("Os percentuais devem ficar entre 0 e 100.");Run(c,"INSERT INTO plans(companyId,name,interestRate,penaltyRate,discountRate) VALUES(@p0,@p1,@p2,@p3,@p4)",company,Required(x.Name,"Plano de contas"),x.InterestRate,x.PenaltyRate,x.DiscountRate);Audit(c,company,"Cadastro de plano de contas",x);return new {ok=true};});
     public object EditPlan(int company,int id,PlanInput x)=>Write(c=> {Existing(c,"plans",id,company);var rates=new[]{x.InterestRate,x.PenaltyRate,x.DiscountRate};if(rates.Any(v=>v<0||v>100))throw new ArgumentException("Os percentuais devem ficar entre 0 e 100.");var name=Required(x.Name,"Plano de contas");var old=(string)Query(c,"SELECT name FROM plans WHERE id=@p0",id)[0]["name"]!;Run(c,"UPDATE plans SET name=@p0,interestRate=@p1,penaltyRate=@p2,discountRate=@p3 WHERE id=@p4",name,x.InterestRate,x.PenaltyRate,x.DiscountRate,id);Run(c,"UPDATE titles SET category=@p0,interestRate=@p1,penaltyRate=@p2,discountRate=@p3 WHERE companyId=@p4 AND category=@p5 AND deleted=0 AND cancelled=0",name,x.InterestRate,x.PenaltyRate,x.DiscountRate,company,old);Audit(c,company,"Edição de plano de contas",new {id,old,input=x});return new {ok=true};});
     public object DeletePlan(int company,int id)=>Write(c=> {Existing(c,"plans",id,company);var name=(string)Query(c,"SELECT name FROM plans WHERE id=@p0",id)[0]["name"]!;var linked=Query(c,"SELECT description,due FROM titles WHERE companyId=@p0 AND category=@p1 AND deleted=0 ORDER BY due,id LIMIT 5",company,name);if(linked.Count>0)throw new ArgumentException("Não foi possível excluir. Este plano de contas está vinculado aos lançamentos: "+LinkedTitles(linked)+".");Run(c,"DELETE FROM plans WHERE id=@p0",id);Audit(c,company,"Exclusão de plano de contas",new{id,name});return new{ok=true};});
+    static string MethodKind(string? value){var kind=(value??"both").ToLowerInvariant();if(kind is not ("both" or "payable" or "receivable"))throw new ArgumentException("Uso da forma de pagamento inválido.");return kind;}
+    public object PaymentMethod(int company,NamedKindInput x)=>Write(c=>{Company(c,company);Run(c,"INSERT INTO payment_methods(companyId,name,kind) VALUES(@p0,@p1,@p2)",company,Required(x.Name,"Forma de pagamento"),MethodKind(x.Kind));Audit(c,company,"Cadastro de forma de pagamento",x);return new{ok=true};});
+    public object EditPaymentMethod(int company,int id,NamedKindInput x)=>Write(c=>{Existing(c,"payment_methods",id,company);var name=Required(x.Name,"Forma de pagamento");Run(c,"UPDATE payment_methods SET name=@p0,kind=@p1 WHERE id=@p2",name,MethodKind(x.Kind),id);Audit(c,company,"Edição de forma de pagamento",new{id,name});return new{ok=true};});
+    public object DeletePaymentMethod(int company,int id)=>Write(c=>{Existing(c,"payment_methods",id,company);if(Query(c,"SELECT id FROM titles WHERE paymentMethodId=@p0 AND deleted=0 UNION SELECT id FROM settlements WHERE paymentMethodId=@p0 LIMIT 1",id).Count>0)throw new ArgumentException("Esta forma está vinculada a lançamentos ou baixas.");var name=(string)Query(c,"SELECT name FROM payment_methods WHERE id=@p0",id)[0]["name"]!;Run(c,"DELETE FROM payment_methods WHERE id=@p0",id);Audit(c,company,"Exclusão de forma de pagamento",new{id,name});return new{ok=true};});
+    public object CostCenter(int company,NamedInput x)=>Write(c=>{Company(c,company);var name=Required(x.Name,"Centro de custo");Run(c,"INSERT INTO cost_centers(companyId,name) VALUES(@p0,@p1)",company,name);Audit(c,company,"Cadastro de centro de custo",new{name});return new{ok=true};});
+    public object EditCostCenter(int company,int id,NamedInput x)=>Write(c=>{Existing(c,"cost_centers",id,company);var old=(string)Query(c,"SELECT name FROM cost_centers WHERE id=@p0",id)[0]["name"]!;var name=Required(x.Name,"Centro de custo");Run(c,"UPDATE cost_centers SET name=@p0 WHERE id=@p1",name,id);Run(c,"UPDATE titles SET costCenter=@p0 WHERE companyId=@p1 AND costCenter=@p2",name,company,old);Audit(c,company,"Edição de centro de custo",new{id,old,name});return new{ok=true};});
+    public object DeleteCostCenter(int company,int id)=>Write(c=>{Existing(c,"cost_centers",id,company);var name=(string)Query(c,"SELECT name FROM cost_centers WHERE id=@p0",id)[0]["name"]!;var linked=Query(c,"SELECT description,due FROM titles WHERE companyId=@p0 AND costCenter=@p1 AND deleted=0 LIMIT 5",company,name);if(linked.Count>0)throw new ArgumentException("Este centro de custo está vinculado aos lançamentos: "+LinkedTitles(linked)+".");Run(c,"DELETE FROM cost_centers WHERE id=@p0",id);Audit(c,company,"Exclusão de centro de custo",new{id,name});return new{ok=true};});
     const string TitlesSql="""
-        SELECT t.*,p.name AS partyName,COALESCE((SELECT SUM(s.principal) FROM settlements s WHERE s.titleId=t.id AND s.reversed=0),0) AS settled,
+        SELECT t.*,p.name AS partyName,pm.name AS paymentMethodName,COALESCE((SELECT SUM(s.principal) FROM settlements s WHERE s.titleId=t.id AND s.reversed=0),0) AS settled,
         t.amount-COALESCE((SELECT SUM(s.principal) FROM settlements s WHERE s.titleId=t.id AND s.reversed=0),0) AS remaining
-        FROM titles t LEFT JOIN parties p ON p.id=t.partyId WHERE t.companyId=@p0 AND t.deleted=0 ORDER BY t.due,t.id
+        FROM titles t LEFT JOIN parties p ON p.id=t.partyId LEFT JOIN payment_methods pm ON pm.id=t.paymentMethodId WHERE t.companyId=@p0 AND t.deleted=0 ORDER BY t.due,t.id
         """;
     public object State(int company,AuthIdentity? actor=null) { lock(gate){using var c=Open();Company(c,company);
         var financialUser=actor is not null&&!actor.GlobalAdmin&&Query(c,"SELECT role FROM user_companies WHERE userId=@p0 AND companyId=@p1 AND active=1",actor.Id,company).Any(row=>string.Equals(row["role"] as string,"user",StringComparison.Ordinal));
@@ -351,10 +515,13 @@ sealed class Ledger {
         parties=Query(c,"SELECT * FROM parties WHERE companyId=@p0 ORDER BY name",company),
         accounts=Query(c,"SELECT a.*,a.opening+COALESCE((SELECT SUM(m.amount) FROM movements m WHERE m.accountId=a.id),0) AS balance FROM accounts a WHERE a.companyId=@p0 ORDER BY a.name",company),
         plans=Query(c,"SELECT * FROM plans WHERE companyId=@p0 ORDER BY name",company),
-        settlements=Query(c,"SELECT s.*,a.name AS accountName FROM settlements s JOIN accounts a ON a.id=s.accountId WHERE s.companyId=@p0 ORDER BY s.id DESC",company),
+        paymentMethods=Query(c,"SELECT * FROM payment_methods WHERE companyId=@p0 ORDER BY name",company),
+        costCenters=Query(c,"SELECT * FROM cost_centers WHERE companyId=@p0 ORDER BY name",company),
+        attachments=Query(c,"SELECT id,titleId,settlementId,name,mimeType,created,length(data) AS size FROM attachments WHERE companyId=@p0 ORDER BY id DESC",company),
+        settlements=Query(c,"SELECT s.*,a.name AS accountName,pm.name AS paymentMethodName FROM settlements s JOIN accounts a ON a.id=s.accountId LEFT JOIN payment_methods pm ON pm.id=s.paymentMethodId WHERE s.companyId=@p0 ORDER BY s.id DESC",company),
         movements=financialUser?[]:Query(c,"SELECT m.*,a.name AS accountName FROM movements m JOIN accounts a ON a.id=m.accountId WHERE m.companyId=@p0 ORDER BY m.date DESC,m.id DESC",company),
         audit=financialUser?[]:Query(c,"SELECT * FROM audit WHERE companyId=@p0 ORDER BY id DESC LIMIT 100",company),
-        permissions=new {role=financialUser?"financial":"administrator",canViewCashFlow=!financialUser,canViewHistory=!financialUser,canManageAccess=!financialUser}
+        permissions=new {role=financialUser?"financial":"administrator",canViewCashFlow=!financialUser,canViewHistory=!financialUser,canManageAccess=!financialUser,canCreateBackup=!financialUser,canManageCostCenters=!financialUser,canManagePlanRates=!financialUser||actor is not null&&CanManagePlanRates(actor,company)}
     };} }
     public PdfReport FinancialReport(int company,string startValue,string endValue) { lock(gate){using var c=Open();Company(c,company);
         var start=Date(startValue);var selectedEnd=Date(endValue);if(selectedEnd<start)throw new ArgumentException("A data final não pode ser anterior à data inicial.");
@@ -369,7 +536,7 @@ sealed class Ledger {
               AND s.date>=@p1 AND s.date<@p2
             ORDER BY s.date,s.id
             """,company,startText,endText);
-        long Cash(Dictionary<string,object?> row)=>Number(row,"principal")+Number(row,"interest")+Number(row,"penalty")-Number(row,"discount");
+        long Cash(Dictionary<string,object?> row)=>Number(row,"principal")+Number(row,"interest")+Number(row,"penalty")+Number(row,"additional")-Number(row,"discount");
         string TitleStatus(Dictionary<string,object?> row) {
             if(Number(row,"cancelled")==1)return "CANCELADO";
             if(Number(row,"remaining")==0)return (string)row["kind"]! == "payable" ? "PAGO" : "RECEBIDO";
@@ -390,7 +557,7 @@ sealed class Ledger {
             settlements.Select(row=>new MonthlyReportLine(
                 Date((string)row["date"]!).ToString("dd/MM/yyyy"),
                 (string)row["kind"]! == "payable" ? "PAGAMENTO" : "RECEBIMENTO",
-                (string)row["description"]!, (string)row["accountName"]!, Cash(row), Principal:Number(row,"principal"), Interest:Number(row,"interest"), Penalty:Number(row,"penalty"), Discount:Number(row,"discount"))).ToList(),
+                (string)row["description"]!, (string)row["accountName"]!, Cash(row), Principal:Number(row,"principal"), Interest:Number(row,"interest"), Penalty:Number(row,"penalty"), Discount:Number(row,"discount"), Additional:Number(row,"additional"))).ToList(),
             reportTitles.Select(row=>new MonthlyReportLine(
                 Date((string)row["due"]!).ToString("dd/MM/yyyy"),
                 (string)row["kind"]! == "payable" ? "A PAGAR" : "A RECEBER",
@@ -407,7 +574,7 @@ sealed class Ledger {
         if(type=="payments") {
             foreach(var row in Query(c,"""
                 SELECT t.id,t.description,t.documentNumber,t.amount,t.due,t.category,COALESCE(p.name,'SEM FORNECEDOR') AS supplier,
-                       s.date AS paymentDate,s.principal,s.interest,s.penalty,s.discount,
+                       s.date AS paymentDate,s.principal,s.interest,s.penalty,s.discount,s.additional,
                        t.amount-COALESCE((SELECT SUM(x.principal) FROM settlements x WHERE x.titleId=t.id AND x.reversed=0),0) AS remaining
                 FROM settlements s JOIN titles t ON t.id=s.titleId LEFT JOIN parties p ON p.id=t.partyId
                 WHERE s.companyId=@p0 AND t.kind='payable' AND t.deleted=0 AND t.cancelled=0 AND s.reversed=0
@@ -422,10 +589,13 @@ sealed class Ledger {
                        COALESCE(SUM(CASE WHEN s.reversed=0 THEN s.interest ELSE 0 END),0) AS interest,
                        COALESCE(SUM(CASE WHEN s.reversed=0 THEN s.penalty ELSE 0 END),0) AS penalty,
                        COALESCE(SUM(CASE WHEN s.reversed=0 THEN s.discount ELSE 0 END),0) AS discount,
+                       COALESCE(SUM(CASE WHEN s.reversed=0 THEN s.additional ELSE 0 END),0) AS additional,
                        t.amount-COALESCE(SUM(CASE WHEN s.reversed=0 THEN s.principal ELSE 0 END),0) AS remaining
                 FROM titles t LEFT JOIN parties p ON p.id=t.partyId LEFT JOIN settlements s ON s.titleId=t.id
                 WHERE t.companyId=@p0 AND t.kind='payable' AND t.deleted=0 AND t.cancelled=0 AND {range}
-                GROUP BY t.id ORDER BY t.due,t.id
+                GROUP BY t.id
+                HAVING t.amount>COALESCE(SUM(CASE WHEN s.reversed=0 THEN s.principal ELSE 0 END),0)
+                ORDER BY t.due,t.id
                 """,company,type=="future"?endText:startText,endText)) rows.Add(ReportRow(row,false));
         }
         var title=type switch {"payments"=>"EXTRATO DE PAGAMENTOS","by-plan"=>"CONTAS A PAGAR POR PLANO DE CONTAS","month"=>"EXTRATO DE CONTAS A PAGAR",_=>"CONTAS A PAGAR DOS PRÓXIMOS MESES"};
@@ -447,7 +617,7 @@ sealed class Ledger {
         if(type=="receipts") {
             foreach(var row in Query(c,"""
                 SELECT t.id,t.description,t.documentNumber,t.amount,t.due,t.category,COALESCE(p.name,'SEM CLIENTE') AS supplier,
-                       s.date AS paymentDate,s.principal,s.interest,s.penalty,s.discount,
+                       s.date AS paymentDate,s.principal,s.interest,s.penalty,s.discount,s.additional,
                        t.amount-COALESCE((SELECT SUM(x.principal) FROM settlements x WHERE x.titleId=t.id AND x.reversed=0),0) AS remaining
                 FROM settlements s JOIN titles t ON t.id=s.titleId LEFT JOIN parties p ON p.id=t.partyId
                 WHERE s.companyId=@p0 AND t.kind='receivable' AND t.deleted=0 AND t.cancelled=0 AND s.reversed=0
@@ -462,10 +632,13 @@ sealed class Ledger {
                        COALESCE(SUM(CASE WHEN s.reversed=0 THEN s.interest ELSE 0 END),0) AS interest,
                        COALESCE(SUM(CASE WHEN s.reversed=0 THEN s.penalty ELSE 0 END),0) AS penalty,
                        COALESCE(SUM(CASE WHEN s.reversed=0 THEN s.discount ELSE 0 END),0) AS discount,
+                       COALESCE(SUM(CASE WHEN s.reversed=0 THEN s.additional ELSE 0 END),0) AS additional,
                        t.amount-COALESCE(SUM(CASE WHEN s.reversed=0 THEN s.principal ELSE 0 END),0) AS remaining
                 FROM titles t LEFT JOIN parties p ON p.id=t.partyId LEFT JOIN settlements s ON s.titleId=t.id
                 WHERE t.companyId=@p0 AND t.kind='receivable' AND t.deleted=0 AND t.cancelled=0 AND {range}
-                GROUP BY t.id ORDER BY t.due,t.id
+                GROUP BY t.id
+                HAVING t.amount>COALESCE(SUM(CASE WHEN s.reversed=0 THEN s.principal ELSE 0 END),0)
+                ORDER BY t.due,t.id
                 """,company,type=="future"?endText:startText,endText)) rows.Add(ReportRow(row,true));
         }
         var title=type switch {"receipts"=>"EXTRATO DE RECEBIMENTOS","by-plan"=>"CONTAS A RECEBER POR PLANO DE CONTAS","month"=>"EXTRATO DE CONTAS A RECEBER",_=>"CONTAS A RECEBER DOS PRÓXIMOS MESES"};
@@ -479,12 +652,43 @@ sealed class Ledger {
         var slug=type switch {"receipts"=>"extrato-recebimentos","by-plan"=>"contas-receber-por-plano","month"=>"extrato-contas-receber",_=>"contas-receber-proximos-meses"};
         return new PdfReport(PayableReportsPdf.Generate(data),$"{slug}-{monthValue}.pdf");
     } }
-    static PayableReportRow ReportRow(Dictionary<string,object?> row,bool receivable) {
-        var principal=Number(row,"principal");var interest=Number(row,"interest");var penalty=Number(row,"penalty");var discount=Number(row,"discount");var remaining=Number(row,"remaining");
-        var status=remaining<=0?(receivable?"RECEBIDO":"PAGO"):principal>0?"PARCIAL":string.CompareOrdinal((string)row["due"]!,DateTime.Today.ToString("yyyy-MM-dd"))<0?"VENCIDO":"EM ABERTO";
-        return new PayableReportRow(Number(row,"id"),(string)row["due"]!,row["paymentDate"] as string,(string)row["supplier"]!,(string)row["documentNumber"]!,(string)row["description"]!,(string)row["category"]!,Number(row,"amount"),principal,remaining,interest,penalty,discount,principal+interest+penalty-discount,status);
+    GenericReportData AdvancedData(SqliteConnection c,int company,string type,string startValue,string endValue,int? partyId,int? accountId){
+        var start=Date(startValue);var end=Date(endValue);if(end<start)throw new ArgumentException("A data final não pode ser anterior à inicial.");if(end.DayNumber-start.DayNumber>1095)throw new ArgumentException("Escolha um período de até três anos.");var endExclusive=end.AddDays(1).ToString("yyyy-MM-dd");var startText=start.ToString("yyyy-MM-dd");var companyRow=Query(c,"SELECT name,cnpj FROM companies WHERE id=@p0",company)[0];var rows=new List<IReadOnlyList<string>>();var headers=new List<string>();var title="";long total=0;List<GenericReportGroup>? groups=null;
+        string M(long value)=>(value/100m).ToString("C",CultureInfo.GetCultureInfo("pt-BR"));string D(string value)=>Date(value).ToString("dd/MM/yyyy");
+        if(type=="overdue"){
+            title="TÍTULOS VENCIDOS E TEMPO DE ATRASO";headers.AddRange(new[]{"VENCIMENTO","ATRASO","TIPO","PESSOA","DESCRIÇÃO","PLANO","VALOR","EM ABERTO"});
+            foreach(var row in Query(c,"""
+                SELECT t.*,COALESCE(p.name,'SEM PESSOA') AS partyName,t.amount-COALESCE((SELECT SUM(s.principal) FROM settlements s WHERE s.titleId=t.id AND s.reversed=0),0) AS remaining
+                FROM titles t LEFT JOIN parties p ON p.id=t.partyId WHERE t.companyId=@p0 AND t.deleted=0 AND t.cancelled=0 AND t.due<@p1
+                AND t.amount>COALESCE((SELECT SUM(s.principal) FROM settlements s WHERE s.titleId=t.id AND s.reversed=0),0) ORDER BY t.due
+                """,company,DateTime.Today.ToString("yyyy-MM-dd"))){var remaining=Number(row,"remaining");var days=DateOnly.FromDateTime(DateTime.Today).DayNumber-Date((string)row["due"]!).DayNumber;rows.Add(new[]{D((string)row["due"]!),$"{days} DIA(S)",(string)row["kind"]! != "payable"?"A RECEBER":"A PAGAR",(string)row["partyName"]!,(string)row["description"]!,(string)row["category"]!,M(Number(row,"amount")),M(remaining)});total+=remaining;}
+        }else if(type=="party"){
+            title="HISTÓRICO FINANCEIRO POR CLIENTE E FORNECEDOR";headers.AddRange(new[]{"VENCIMENTO","PESSOA","TIPO","DESCRIÇÃO","PLANO","VALOR","EM ABERTO"});var filter=partyId.HasValue?" AND t.partyId=@p3":"";var values=partyId.HasValue?new object?[]{company,startText,endExclusive,partyId}:new object?[]{company,startText,endExclusive};
+            var partyGroups=new Dictionary<string,List<IReadOnlyList<string>>>();var partyTotals=new Dictionary<string,long>();
+            foreach(var row in Query(c,$"""SELECT t.*,COALESCE(p.name,'SEM PESSOA') AS partyName,t.amount-COALESCE((SELECT SUM(s.principal) FROM settlements s WHERE s.titleId=t.id AND s.reversed=0),0) AS remaining FROM titles t LEFT JOIN parties p ON p.id=t.partyId WHERE t.companyId=@p0 AND t.deleted=0 AND t.due>=@p1 AND t.due<@p2 {filter} ORDER BY partyName,t.due""",values)){var key=(string)row["partyName"]!;var remaining=Number(row,"remaining");var line=new[]{D((string)row["due"]!),key,(string)row["kind"]! != "payable"?"A RECEBER":"A PAGAR",(string)row["description"]!,(string)row["category"]!,M(Number(row,"amount")),M(remaining)};rows.Add(line);if(!partyGroups.TryGetValue(key,out var list)){list=[];partyGroups[key]=list;partyTotals[key]=0;}list.Add(line);partyTotals[key]+=remaining;total+=remaining;}
+            groups=partyGroups.OrderBy(item=>item.Key).Select(item=>new GenericReportGroup($"CLIENTE / FORNECEDOR: {item.Key}",item.Value,$"SALDO DO CADASTRO: {M(partyTotals[item.Key])}")).ToList();
+        }else if(type=="cost-center"){
+            title="RECEITAS E DESPESAS POR CENTRO DE CUSTO";headers.AddRange(new[]{"VENCIMENTO","CENTRO DE CUSTO","TIPO","DESCRIÇÃO","PLANO","VALOR","EM ABERTO"});
+            foreach(var row in Query(c,"""SELECT t.*,t.amount-COALESCE((SELECT SUM(s.principal) FROM settlements s WHERE s.titleId=t.id AND s.reversed=0),0) AS remaining FROM titles t WHERE t.companyId=@p0 AND t.deleted=0 AND t.due>=@p1 AND t.due<@p2 ORDER BY costCenter,due""",company,startText,endExclusive)){rows.Add(new[]{D((string)row["due"]!),string.IsNullOrWhiteSpace(row["costCenter"] as string)?"SEM CENTRO":(string)row["costCenter"]!,(string)row["kind"]! != "payable"?"RECEITA":"DESPESA",(string)row["description"]!,(string)row["category"]!,M(Number(row,"amount")),M(Number(row,"remaining"))});total+=Number(row,"amount");}
+        }else if(type=="account"){
+            title="EXTRATO POR CONTA FINANCEIRA";headers.AddRange(new[]{"DATA","CONTA","MOVIMENTO","ENTRADA","SAÍDA","SALDO DO MOVIMENTO"});var filter=accountId.HasValue?" AND m.accountId=@p3":"";var values=accountId.HasValue?new object?[]{company,startText,endExclusive,accountId}:new object?[]{company,startText,endExclusive};
+            var accountGroups=new Dictionary<string,List<IReadOnlyList<string>>>();var accountTotals=new Dictionary<string,long>();
+            foreach(var row in Query(c,$"""SELECT m.*,a.name AS accountName FROM movements m JOIN accounts a ON a.id=m.accountId WHERE m.companyId=@p0 AND m.date>=@p1 AND m.date<@p2 {filter} ORDER BY a.name,m.date,m.id""",values)){var amount=Number(row,"amount");var key=(string)row["accountName"]!;var line=new[]{D((string)row["date"]!),key,(string)row["description"]!,amount>0?M(amount):"-",amount<0?M(-amount):"-",M(amount)};rows.Add(line);if(!accountGroups.TryGetValue(key,out var list)){list=[];accountGroups[key]=list;accountTotals[key]=0;}list.Add(line);accountTotals[key]+=amount;total+=amount;}
+            groups=accountGroups.OrderBy(item=>item.Key).Select(item=>new GenericReportGroup($"CONTA FINANCEIRA: {item.Key}",item.Value,$"MOVIMENTO LÍQUIDO: {M(accountTotals[item.Key])}")).ToList();
+        }else if(type=="cash-flow"){
+            title="FLUXO DE CAIXA PREVISTO E REALIZADO";headers.AddRange(new[]{"DATA","ORIGEM","DESCRIÇÃO","ENTRADA","SAÍDA","SITUAÇÃO"});
+            foreach(var row in Query(c,"""SELECT due AS date,'PREVISTO' AS origin,description,kind,amount FROM titles WHERE companyId=@p0 AND deleted=0 AND cancelled=0 AND due>=@p1 AND due<@p2 UNION ALL SELECT date,'REALIZADO',description,CASE WHEN amount>=0 THEN 'receivable' ELSE 'payable' END,abs(amount) FROM movements WHERE companyId=@p0 AND date>=@p1 AND date<@p2 ORDER BY date""",company,startText,endExclusive)){var amount=Number(row,"amount");var incoming=(string)row["kind"]! != "payable";rows.Add(new[]{D((string)row["date"]!),(string)row["origin"]!,(string)row["description"]!,incoming?M(amount):"-",incoming?"-":M(amount),(string)row["origin"]!});total+=incoming?amount:-amount;}
+        }else throw new ArgumentException("Tipo de relatório avançado inválido.");
+        return new((string)companyRow["name"]!,(string)companyRow["cnpj"]!,title,$"{start:dd/MM/yyyy} A {end:dd/MM/yyyy}",headers,rows,$"TOTAL DO RELATÓRIO: {M(total)}",groups);
     }
-    public object Title(int company,TitleInput x)=>Write(c=> {
+    public PdfReport AdvancedReport(int company,string type,string start,string end,int? partyId,int? accountId){lock(gate){using var c=Open();Company(c,company);var data=AdvancedData(c,company,type,start,end,partyId,accountId);return new(GenericReportPdf.Generate(data),$"{type}-{start}-a-{end}.pdf");}}
+    public DownloadFile ExportCsv(int company,string type,string start,string end,int? partyId,int? accountId){lock(gate){using var c=Open();Company(c,company);var data=AdvancedData(c,company,type,start,end,partyId,accountId);static string Escape(string value)=>"\""+value.Replace("\"","\"\"")+"\"";var lines=new List<string>();if(data.Groups is {Count:>0}){foreach(var group in data.Groups){if(lines.Count>0)lines.Add("");lines.Add(Escape(group.Name));lines.Add(string.Join(';',data.Headers.Select(Escape)));lines.AddRange(group.Rows.Select(row=>string.Join(';',row.Select(Escape))));lines.Add(Escape(group.Summary));}}else{lines.Add(string.Join(';',data.Headers.Select(Escape)));lines.AddRange(data.Rows.Select(row=>string.Join(';',row.Select(Escape))));}lines.Add("");lines.Add(Escape(data.Summary));return new(Encoding.UTF8.GetPreamble().Concat(Encoding.UTF8.GetBytes(string.Join("\r\n",lines))).ToArray(),$"{type}-{start}-a-{end}.csv");}}
+    static PayableReportRow ReportRow(Dictionary<string,object?> row,bool receivable) {
+        var principal=Number(row,"principal");var interest=Number(row,"interest");var penalty=Number(row,"penalty");var discount=Number(row,"discount");var additional=Number(row,"additional");var remaining=Number(row,"remaining");
+        var status=remaining<=0?(receivable?"RECEBIDO":"PAGO"):principal>0?"PARCIAL":string.CompareOrdinal((string)row["due"]!,DateTime.Today.ToString("yyyy-MM-dd"))<0?"VENCIDO":"EM ABERTO";
+        return new PayableReportRow(Number(row,"id"),(string)row["due"]!,row["paymentDate"] as string,(string)row["supplier"]!,(string)row["documentNumber"]!,(string)row["description"]!,(string)row["category"]!,Number(row,"amount"),principal,remaining,interest,penalty,discount,additional,principal+interest+penalty+additional-discount,status);
+    }
+    public object Title(int company,TitleInput x,AuthIdentity? actor=null)=>Write(c=> {
         Company(c,company);if(x.Kind!="payable"&&x.Kind!="receivable")throw new ArgumentException("Tipo inválido.");Money(x.Amount,true);var due=Date(x.Due);var description=Required(x.Description,"Descrição");
         var document=(x.DocumentNumber??"").Trim().ToUpperInvariant();var issue=string.IsNullOrWhiteSpace(x.IssueDate)?"":Date(x.IssueDate).ToString("yyyy-MM-dd");
         if(document.Length>0 && Query(c,"SELECT id FROM titles WHERE companyId=@p0 AND deleted=0 AND documentNumber=@p1 AND partyId IS @p2 LIMIT 1",company,document,x.PartyId).Count>0)throw new ArgumentException("Este documento já foi lançado para o mesmo fornecedor ou cliente.");
@@ -492,26 +696,41 @@ sealed class Ledger {
         var plan=Query(c,"SELECT * FROM plans WHERE companyId=@p0 AND lower(name)=lower(@p1)",company,planName).SingleOrDefault();
         if(plan is null){Run(c,"INSERT INTO plans(companyId,name) VALUES(@p0,@p1)",company,planName);plan=Query(c,"SELECT * FROM plans WHERE id=last_insert_rowid()")[0];}
         if(x.Installments<1||x.Installments>120||x.Amount<x.Installments)throw new ArgumentException("Informe entre 1 e 120 parcelas, com ao menos um centavo por parcela.");
+        if(x.InstallmentIntervalDays<0||x.InstallmentIntervalDays>365)throw new ArgumentException("O intervalo deve ficar entre 1 e 365 dias, ou zero para mensal.");
         var custom=x.InstallmentAmounts is not null||x.InstallmentDues is not null;
         if(custom && (x.InstallmentAmounts is null||x.InstallmentDues is null||x.InstallmentAmounts.Length!=x.Installments||x.InstallmentDues.Length!=x.Installments))throw new ArgumentException("Complete o valor e o vencimento de todas as parcelas.");
         if(custom && (x.InstallmentAmounts!.Any(v=>v<=0)||x.InstallmentAmounts!.Sum()!=x.Amount))throw new ArgumentException("A soma das parcelas deve ser igual ao valor total.");
         var customDues=custom?x.InstallmentDues!.Select(Date).ToArray():Array.Empty<DateOnly>();
         if(x.PartyId.HasValue)Existing(c,"parties",x.PartyId.Value,company);
+        if(x.PaymentMethodId.HasValue){Existing(c,"payment_methods",x.PaymentMethodId.Value,company);var method=Query(c,"SELECT kind FROM payment_methods WHERE id=@p0",x.PaymentMethodId.Value)[0]["kind"] as string;if(method!="both"&&method!=x.Kind)throw new ArgumentException("A forma selecionada não atende este tipo de lançamento.");}
+        var costCenter=RequiredOrEmpty(x.CostCenter);var existingCostCenter=costCenter.Length==0||Query(c,"SELECT id FROM cost_centers WHERE companyId=@p0 AND upper(name)=upper(@p1)",company,costCenter).Count>0;if(!existingCostCenter&&actor is not null&&IsFinancialUser(actor,company))throw new ArgumentException("Selecione um centro de custo já cadastrado pelo administrador.");if(!existingCostCenter)Run(c,"INSERT INTO cost_centers(companyId,name) VALUES(@p0,@p1)",company,costCenter);
         var group=x.Installments>1 ? Guid.NewGuid().ToString("N") : null;
-        for(var i=0;i<x.Installments;i++) Run(c,"INSERT INTO titles(companyId,kind,description,amount,due,partyId,category,notes,installmentGroup,installmentNumber,installmentCount,interestRate,penaltyRate,discountRate,documentNumber,issueDate,branch,costCenter) VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7,@p8,@p9,@p10,@p11,@p12,@p13,@p14,@p15,@p16,@p17)",company,x.Kind,description+(x.Installments>1?$" ({i+1}/{x.Installments})":""),custom?x.InstallmentAmounts![i]:x.Amount/x.Installments+(i<x.Amount%x.Installments?1:0),(custom?customDues[i]:due.AddMonths(i)).ToString("yyyy-MM-dd"),x.PartyId,planName,(x.Notes??"").ToUpperInvariant(),group,i+1,x.Installments,plan["interestRate"],plan["penaltyRate"],plan["discountRate"],document,issue,RequiredOrEmpty(x.Branch),RequiredOrEmpty(x.CostCenter));
+        for(var i=0;i<x.Installments;i++) Run(c,"INSERT INTO titles(companyId,kind,description,amount,due,partyId,category,notes,installmentGroup,installmentNumber,installmentCount,interestRate,penaltyRate,discountRate,documentNumber,issueDate,branch,costCenter,paymentMethodId) VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7,@p8,@p9,@p10,@p11,@p12,@p13,@p14,@p15,@p16,@p17,@p18)",company,x.Kind,description+(x.Installments>1?$" ({i+1}/{x.Installments})":""),custom?x.InstallmentAmounts![i]:x.Amount/x.Installments+(i<x.Amount%x.Installments?1:0),(custom?customDues[i]:x.InstallmentIntervalDays==7?due.AddDays(i*7):due.AddMonths(i)).ToString("yyyy-MM-dd"),x.PartyId,planName,(x.Notes??"").ToUpperInvariant(),group,i+1,x.Installments,plan["interestRate"],plan["penaltyRate"],plan["discountRate"],document,issue,RequiredOrEmpty(x.Branch),costCenter,x.PaymentMethodId);
         Audit(c,company,"Lançamento",x);return new {ok=true};
     });
-    public object Settle(int company,int id,SettlementInput x)=>Write(c=> {
+    long SettleCore(SqliteConnection c,int company,int id,SettlementInput x){
         Existing(c,"titles",id,company);Existing(c,"accounts",x.AccountId,company);var date=Date(x.Date);if(date>DateOnly.FromDateTime(DateTime.Today))throw new ArgumentException("A baixa não pode ter data futura.");
-        Money(x.Principal,true);Money(x.Interest);Money(x.Penalty);Money(x.Discount);
+        Money(x.Principal,true);Money(x.Interest);Money(x.Penalty);Money(x.Discount);Money(x.Additional);
+        if(x.PaymentMethodId.HasValue)Existing(c,"payment_methods",x.PaymentMethodId.Value,company);
         var title=Query(c,TitlesSql,company).Single(r=>Number(r,"id")==id);
         if(Number(title,"cancelled")!=0||x.Principal>Number(title,"remaining"))throw new ArgumentException("Valor excede o saldo em aberto ou título está cancelado.");
         if(x.Discount>x.Principal)throw new ArgumentException("Desconto não pode exceder o principal da baixa.");
-        var cash=checked(x.Principal+x.Interest+x.Penalty-x.Discount);
-        Run(c,"INSERT INTO settlements(companyId,titleId,accountId,principal,interest,penalty,discount,date) VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7)",company,id,x.AccountId,x.Principal,x.Interest,x.Penalty,x.Discount,x.Date);
+        var cash=checked(x.Principal+x.Interest+x.Penalty+x.Additional-x.Discount);
+        Run(c,"INSERT INTO settlements(companyId,titleId,accountId,principal,interest,penalty,discount,date,additional,paymentMethodId) VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7,@p8,@p9)",company,id,x.AccountId,x.Principal,x.Interest,x.Penalty,x.Discount,x.Date,x.Additional,x.PaymentMethodId);
         var sid=Number(Query(c,"SELECT last_insert_rowid() AS id")[0],"id");
         Run(c,"INSERT INTO movements(companyId,accountId,amount,date,description,settlementId) VALUES(@p0,@p1,@p2,@p3,@p4,@p5)",company,x.AccountId,(string)title["kind"]! == "payable"?-cash:cash,x.Date,title["description"],sid);
-        Audit(c,company,"Baixa",new {titleId=id,settlementId=sid,input=x});return new {id=sid};
+        Audit(c,company,"Baixa",new {titleId=id,settlementId=sid,input=x});return sid;
+    }
+    public object Settle(int company,int id,SettlementInput x)=>Write(c=>new{id=SettleCore(c,company,id,x)});
+    public object BulkSettle(int company,BulkSettlementInput x)=>Write(c=>{
+        if(x.Items is null||x.Items.Length<2||x.Items.Length>200)throw new ArgumentException("Selecione de 2 a 200 títulos para a baixa em lote.");if(x.Items.Select(i=>i.TitleId).Distinct().Count()!=x.Items.Length)throw new ArgumentException("Há títulos repetidos na seleção.");
+        Existing(c,"accounts",x.AccountId,company);Date(x.Date);var ids=new List<long>();long total=0;
+        foreach(var item in x.Items){var input=new SettlementInput(x.AccountId,item.Principal,item.Interest,item.Penalty,item.Discount,x.Date,item.Additional,x.PaymentMethodId);ids.Add(SettleCore(c,company,item.TitleId,input));total=checked(total+item.Principal+item.Interest+item.Penalty+item.Additional-item.Discount);}
+        Audit(c,company,"Baixa em lote",new{count=ids.Count,total,settlementIds=ids});return new{ok=true,count=ids.Count,total,settlementIds=ids};
+    });
+    public object Duplicate(int company,int id,DuplicateInput x)=>Write(c=>{
+        Existing(c,"titles",id,company);var t=Query(c,"SELECT * FROM titles WHERE id=@p0 AND deleted=0",id).SingleOrDefault()??throw new ArgumentException("Lançamento não encontrado.");var due=string.IsNullOrWhiteSpace(x.Due)?(string)t["due"]!:Date(x.Due).ToString("yyyy-MM-dd");var description=Regex.Replace((string)t["description"]!,@" \(\d+/\d+\)$","")+" - CÓPIA";
+        Run(c,"INSERT INTO titles(companyId,kind,description,amount,due,partyId,category,notes,installmentNumber,installmentCount,interestRate,penaltyRate,discountRate,issueDate,branch,costCenter,paymentMethodId) VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7,1,1,@p8,@p9,@p10,@p11,@p12,@p13,@p14)",company,t["kind"],description,t["amount"],due,t["partyId"],t["category"],t["notes"],t["interestRate"],t["penaltyRate"],t["discountRate"],t["issueDate"],t["branch"],t["costCenter"],t["paymentMethodId"]);var newId=Number(Query(c,"SELECT last_insert_rowid() AS id")[0],"id");Audit(c,company,"Duplicação",new{sourceId=id,titleId=newId,due});return new{ok=true,id=newId};
     });
     public object Reverse(int company,int id,ReasonInput x)=>Write(c=> {
         Existing(c,"settlements",id,company);var reason=Required(x.Reason,"Motivo");var s=Query(c,"SELECT * FROM settlements WHERE id=@p0",id)[0];
@@ -533,10 +752,12 @@ sealed class Ledger {
         }
         return new {ok=true,cancelledCount=targets.Count};
     });
-    public object Edit(int company,int id,EditTitleInput x)=>Write(c=> {
+    public object Edit(int company,int id,EditTitleInput x,AuthIdentity? actor=null)=>Write(c=> {
         if(x.Scope!="single" && x.Scope!="all_open")throw new ArgumentException("Escolha editar somente esta parcela ou todas as parcelas sem baixa.");
         Money(x.Amount,true);var due=Date(x.Due);var description=Required(x.Description,"Descrição");
         if(x.PartyId.HasValue)Existing(c,"parties",x.PartyId.Value,company);
+        if(x.PaymentMethodId.HasValue)Existing(c,"payment_methods",x.PaymentMethodId.Value,company);
+        var costCenter=RequiredOrEmpty(x.CostCenter);var existingCostCenter=costCenter.Length==0||Query(c,"SELECT id FROM cost_centers WHERE companyId=@p0 AND upper(name)=upper(@p1)",company,costCenter).Count>0;if(!existingCostCenter&&actor is not null&&IsFinancialUser(actor,company))throw new ArgumentException("Selecione um centro de custo já cadastrado pelo administrador.");if(!existingCostCenter)Run(c,"INSERT INTO cost_centers(companyId,name) VALUES(@p0,@p1)",company,costCenter);
         var all=Query(c,TitlesSql,company);var selected=all.SingleOrDefault(r=>Number(r,"id")==id)??throw new ArgumentException("Lançamento não encontrado.");
         if(Number(selected,"cancelled")!=0||Number(selected,"settled")!=0)throw new ArgumentException("Só é possível editar um lançamento sem baixa e que não esteja cancelado.");
         var group=selected["installmentGroup"] as string;
@@ -546,7 +767,7 @@ sealed class Ledger {
         foreach(var target in targets) {
             var number=Convert.ToInt32(target["installmentNumber"]);var count=Convert.ToInt32(target["installmentCount"]);
             var label=description+(count>1?$" ({number}/{count})":"");var targetDue=due.AddMonths(number-selectedNumber).ToString("yyyy-MM-dd");
-            Run(c,"UPDATE titles SET description=@p0,amount=@p1,due=@p2,partyId=@p3,category=@p4,notes=@p5,documentNumber=@p6,issueDate=@p7,branch=@p8,costCenter=@p9 WHERE id=@p10",label,x.Amount,targetDue,x.PartyId,(x.Category??"").ToUpperInvariant(),(x.Notes??"").ToUpperInvariant(),RequiredOrEmpty(x.DocumentNumber),string.IsNullOrWhiteSpace(x.IssueDate)?"":Date(x.IssueDate).ToString("yyyy-MM-dd"),RequiredOrEmpty(x.Branch),RequiredOrEmpty(x.CostCenter),Number(target,"id"));
+            Run(c,"UPDATE titles SET description=@p0,amount=@p1,due=@p2,partyId=@p3,category=@p4,notes=@p5,documentNumber=@p6,issueDate=@p7,branch=@p8,costCenter=@p9,paymentMethodId=@p10 WHERE id=@p11",label,x.Amount,targetDue,x.PartyId,(x.Category??"").ToUpperInvariant(),(x.Notes??"").ToUpperInvariant(),RequiredOrEmpty(x.DocumentNumber),string.IsNullOrWhiteSpace(x.IssueDate)?"":Date(x.IssueDate).ToString("yyyy-MM-dd"),RequiredOrEmpty(x.Branch),costCenter,x.PaymentMethodId,Number(target,"id"));
             Audit(c,company,"Edição",new {titleId=Number(target,"id"),description=label,amount=x.Amount,due=targetDue,scope=x.Scope});
         }
         return new {ok=true,editedCount=targets.Count};
@@ -569,6 +790,17 @@ sealed class Ledger {
         Existing(c,"accounts",x.FromId,company);Existing(c,"accounts",x.ToId,company);Money(x.Amount,true);var date=Date(x.Date);if(date>DateOnly.FromDateTime(DateTime.Today))throw new ArgumentException("Transferência não pode ter data futura.");if(x.FromId==x.ToId)throw new ArgumentException("Selecione contas diferentes.");
         Run(c,"INSERT INTO movements(companyId,accountId,amount,date,description) VALUES(@p0,@p1,@p2,@p3,'Transferência entre contas'),(@p0,@p4,@p5,@p3,'Transferência entre contas')",company,x.FromId,-x.Amount,x.Date,x.ToId,x.Amount);Audit(c,company,"Transferência",x);return new {ok=true};
     });
+    public object Adjust(int company,int accountId,AdjustmentInput x)=>Write(c=>{
+        Existing(c,"accounts",accountId,company);if(x.Amount==0)throw new ArgumentException("Informe um valor diferente de zero.");Money(Math.Abs(x.Amount),true);var date=Date(x.Date);if(date>DateOnly.FromDateTime(DateTime.Today))throw new ArgumentException("O ajuste não pode ter data futura.");var reason=Required(x.Reason,"Justificativa");
+        Run(c,"INSERT INTO movements(companyId,accountId,amount,date,description) VALUES(@p0,@p1,@p2,@p3,@p4)",company,accountId,x.Amount,date.ToString("yyyy-MM-dd"),"AJUSTE DE SALDO: "+reason);Audit(c,company,"Ajuste de saldo",new{accountId,x.Amount,date=x.Date,reason});return new{ok=true};
+    });
+    public object AddAttachment(int company,AttachmentInput x)=>Write(c=>{
+        Company(c,company);if((x.TitleId.HasValue?1:0)+(x.SettlementId.HasValue?1:0)!=1)throw new ArgumentException("Vincule o anexo a um lançamento ou a uma baixa.");if(x.TitleId.HasValue)Existing(c,"titles",x.TitleId.Value,company);if(x.SettlementId.HasValue)Existing(c,"settlements",x.SettlementId.Value,company);
+        byte[] data;try{data=Convert.FromBase64String(x.DataBase64??"");}catch(FormatException){throw new ArgumentException("Arquivo inválido.");}if(data.Length==0||data.Length>10*1024*1024)throw new ArgumentException("O anexo deve ter até 10 MB.");var name=Path.GetFileName(Required(x.Name,"Nome do arquivo"));var mime=string.IsNullOrWhiteSpace(x.MimeType)?"application/octet-stream":x.MimeType.Trim().ToLowerInvariant();
+        Run(c,"INSERT INTO attachments(companyId,titleId,settlementId,name,mimeType,data) VALUES(@p0,@p1,@p2,@p3,@p4,@p5)",company,x.TitleId,x.SettlementId,name,mime,data);var id=Number(Query(c,"SELECT last_insert_rowid() AS id")[0],"id");Audit(c,company,"Anexo incluído",new{id,x.TitleId,x.SettlementId,name,size=data.Length});return new{ok=true,id};
+    });
+    public AttachmentFile Attachment(int company,int id){lock(gate){using var c=Open();Existing(c,"attachments",id,company);var row=Query(c,"SELECT name,mimeType,data FROM attachments WHERE id=@p0",id)[0];return new((byte[])row["data"]!,(string)row["mimeType"]!,(string)row["name"]!);}}
+    public object DeleteAttachment(int company,int id)=>Write(c=>{Existing(c,"attachments",id,company);var name=(string)Query(c,"SELECT name FROM attachments WHERE id=@p0",id)[0]["name"]!;Run(c,"DELETE FROM attachments WHERE id=@p0",id);Audit(c,company,"Anexo excluído",new{id,name});return new{ok=true};});
     public object ResetSupermarketDemo()=>Write(c=> {
         Run(c,"DELETE FROM movements; DELETE FROM settlements; DELETE FROM audit; DELETE FROM titles; DELETE FROM parties; DELETE FROM accounts; DELETE FROM plans; DELETE FROM user_companies; DELETE FROM companies;");
         Run(c,"INSERT INTO companies(id,name,cnpj) VALUES(1,'SUPERMERCADO MODELO MONALISA LTDA','12345678000195')");
@@ -612,5 +844,19 @@ sealed class Ledger {
         Audit(c,1,"Base de demonstração",new{segmento="SUPERMERCADO",geradoEm=DateTime.Now});
         return new{ok=true,companyId=1};
     });
-    public string Backup() {lock(gate){var folder=Path.Combine(Path.GetDirectoryName(path)!,"backups");Directory.CreateDirectory(folder);var target=Path.Combine(folder,$"financeiro-{DateTime.Now:yyyyMMdd-HHmmss-fff}.db");using var src=Open();using var dest=new SqliteConnection($"Data Source={target}");dest.Open();src.BackupDatabase(dest);return target;}}
+    public string Backup() {lock(gate){var folder=Path.Combine(Path.GetDirectoryName(path)!,"backups");Directory.CreateDirectory(folder);var target=Path.Combine(folder,$"financeiro-{DateTime.Now:yyyyMMdd-HHmmss-fff}.db");using var src=Open();using var dest=new SqliteConnection(new SqliteConnectionStringBuilder{DataSource=target,Pooling=false}.ToString());dest.Open();src.BackupDatabase(dest);return target;}}
+    public object PrepareGestoresImport(GestoresImportInput x,AuthIdentity actor){if(!actor.GlobalAdmin)throw new ArgumentException("Somente o administrador geral pode recuperar um backup do Gestores.");lock(gate)return GestoresBackupImporter.Prepare(path,x);}
+    public object CommitGestoresImport(GestoresImportCommitInput x,AuthIdentity actor){
+        if(!actor.GlobalAdmin)throw new ArgumentException("Somente o administrador geral pode recuperar um backup do Gestores.");
+        lock(gate){var prepared=GestoresBackupImporter.PreparedPath(path,x.Token);using(var check=new SqliteConnection($"Data Source={prepared};Mode=ReadOnly")){check.Open();if(!string.Equals(Query(check,"PRAGMA integrity_check")[0].Values.FirstOrDefault()?.ToString(),"ok",StringComparison.OrdinalIgnoreCase))throw new ArgumentException("O backup convertido não passou na verificação de integridade.");foreach(var table in new[]{"companies","titles","accounts","settlements","movements","audit","users"})if(Query(check,"SELECT name FROM sqlite_master WHERE type='table' AND name=@p0",table).Count==0)throw new ArgumentException("O backup convertido está incompleto.");}
+            var safety=Backup();SqliteConnection.ClearAllPools();foreach(var suffix in new[]{"-wal","-shm"}){var side=path+suffix;if(File.Exists(side))File.Delete(side);}File.Copy(prepared,path,true);using(var restored=Open()){var companyRow=Query(restored,"SELECT id FROM companies ORDER BY id LIMIT 1").FirstOrDefault();if(companyRow is not null)Audit(restored,Convert.ToInt32(companyRow["id"]),"Recuperação do Gestores",new{copiaDeSeguranca=safety});}try{File.Delete(prepared);}catch{}return new{ok=true,safetyBackup=safety};
+        }
+    }
+    public object Restore(RestoreInput x,AuthIdentity actor){lock(gate){
+        if(!actor.GlobalAdmin)throw new ArgumentException("Somente o administrador geral pode restaurar um backup completo.");
+        byte[] data;try{data=Convert.FromBase64String(x.DataBase64??"");}catch(FormatException){throw new ArgumentException("Arquivo de backup inválido.");}if(data.Length<4096||data.Length>100*1024*1024)throw new ArgumentException("O backup deve ter entre 4 KB e 100 MB.");
+        var temp=Path.Combine(Path.GetDirectoryName(path)!,$"restore-{Guid.NewGuid():N}.db");File.WriteAllBytes(temp,data);try{using(var check=new SqliteConnection($"Data Source={temp};Mode=ReadOnly")){check.Open();var integrity=Query(check,"PRAGMA integrity_check");if(integrity.Count==0||!string.Equals(integrity[0].Values.FirstOrDefault()?.ToString(),"ok",StringComparison.OrdinalIgnoreCase))throw new ArgumentException("O arquivo não passou na verificação de integridade.");foreach(var table in new[]{"companies","titles","accounts","settlements","movements","audit","users"})if(Query(check,"SELECT name FROM sqlite_master WHERE type='table' AND name=@p0",table).Count==0)throw new ArgumentException("O arquivo não é um backup compatível do Monalisa Financeiro.");}
+            var safety=Backup();SqliteConnection.ClearAllPools();foreach(var suffix in new[]{"-wal","-shm"}){var side=path+suffix;if(File.Exists(side))File.Delete(side);}File.Copy(temp,path,true);using(var restored=Open()){var companyRow=Query(restored,"SELECT id FROM companies ORDER BY id LIMIT 1").FirstOrDefault();if(companyRow is not null)Audit(restored,Convert.ToInt32(companyRow["id"]),"Restauração de backup",new{arquivo=Path.GetFileName(x.Name),copiaDeSeguranca=safety});}return new{ok=true,safetyBackup=safety};
+        }finally{if(File.Exists(temp))File.Delete(temp);}
+    }}
 }
