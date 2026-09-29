@@ -1,8 +1,8 @@
 # Validação da empresa de teste
 
-Data: 26/09/2026  
-Ambiente: base SQLite isolada, servidor local na porta 5204  
-Empresa: MERCADO TESTE VALIDACAO LTDA  
+Data: 26/09/2026
+Ambiente: base SQLite isolada, servidor local na porta 5204
+Empresa: MERCADO TESTE VALIDACAO LTDA
 CNPJ: 12.345.678/0001-95
 
 ## Proteção dos dados reais

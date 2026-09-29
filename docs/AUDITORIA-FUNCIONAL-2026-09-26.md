@@ -1,6 +1,6 @@
 # Auditoria funcional do Monalisa Financeiro
 
-Data da validação: 26/09/2026  
+Data da validação: 26/09/2026
 Escopo: aplicativo Windows/Flutter, API C#, banco SQLite, relatórios e proteção dos dados.
 
 ## Resultado após a implementação
