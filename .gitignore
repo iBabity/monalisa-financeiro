@@ -23,3 +23,5 @@ license-server/data/
 *.db-shm
 *.db-wal
 dotnet-install.ps1
+
+dist/

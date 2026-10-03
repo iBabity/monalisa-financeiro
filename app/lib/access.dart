@@ -684,27 +684,43 @@ class _AccessGateState extends State<AccessGate> {
                                         CrossAxisAlignment.stretch,
                                     children: [
                                       Text(
-                                        'LICENÇA ATUAL: ${license['company'] ?? 'NÃO IDENTIFICADA'}',
+                                        license['showcase'] == true
+                                            ? 'EDIÇÃO DE DEMONSTRAÇÃO • ACESSO LOCAL LIBERADO'
+                                            : 'LICENÇA ATUAL: ${license['company'] ?? 'NÃO IDENTIFICADA'}',
                                         style: const TextStyle(
                                           fontSize: 11,
                                           fontWeight: FontWeight.w700,
                                         ),
                                       ),
-                                      const SizedBox(height: 8),
-                                      OutlinedButton.icon(
-                                        onPressed: busy
-                                            ? null
-                                            : () => setState(() {
-                                                changingLicense =
-                                                    !changingLicense;
-                                                error = null;
-                                              }),
-                                        icon: const Icon(Icons.key_outlined),
-                                        label: const Text(
-                                          'TROCAR LICENÇA DESTA MÁQUINA',
+                                      if (license['showcase'] == true) ...[
+                                        const SizedBox(height: 6),
+                                        Text(
+                                          'ESTA VERSÃO FOI PREPARADA PARA APRESENTAÇÕES E NÃO EXIGE CHAVE DE ATIVAÇÃO.',
+                                          style: TextStyle(
+                                            color: Theme.of(context)
+                                                .colorScheme
+                                                .onSurfaceVariant,
+                                            fontSize: 10,
+                                          ),
                                         ),
-                                      ),
-                                      if (changingLicense) ...[
+                                      ] else ...[
+                                        const SizedBox(height: 8),
+                                        OutlinedButton.icon(
+                                          onPressed: busy
+                                              ? null
+                                              : () => setState(() {
+                                                  changingLicense =
+                                                      !changingLicense;
+                                                  error = null;
+                                                }),
+                                          icon: const Icon(Icons.key_outlined),
+                                          label: const Text(
+                                            'TROCAR LICENÇA DESTA MÁQUINA',
+                                          ),
+                                        ),
+                                      ],
+                                      if (license['showcase'] != true &&
+                                          changingLicense) ...[
                                         const SizedBox(height: 12),
                                         TextField(
                                           controller: activationKey,

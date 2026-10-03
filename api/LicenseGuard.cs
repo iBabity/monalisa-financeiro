@@ -6,7 +6,7 @@ using System.Text;
 using System.Text.Json;
 
 record LicenseActivationInput(string ActivationKey);
-record LicenseSnapshot(string Status,string Message,string Company,string Cnpj,string ValidUntil,bool Offline,bool Configured,bool NetworkConfigured=false,bool RestartRequired=false,bool IsSecondary=false,string NetworkMode="standalone");
+record LicenseSnapshot(string Status,string Message,string Company,string Cnpj,string ValidUntil,bool Offline,bool Configured,bool NetworkConfigured=false,bool RestartRequired=false,bool IsSecondary=false,string NetworkMode="standalone",bool Showcase=false);
 record StoredLicense(string InstallationId,string ProtectedKey,string Token,string LastCheck);
 record RemoteLicenseResponse(string Token);
 record SignedLicensePayload(int LicenseId,string Company,string Cnpj,string InstallationId,string Status,string Message,string CheckedAt,string ValidUntil);
@@ -44,6 +44,7 @@ sealed class LicenseGuard {
     }
 
     public async Task<LicenseSnapshot> Status(bool force=false) {
+        if(Environment.GetEnvironmentVariable("MONALISA_SHOWCASE")=="1")return WithCurrentNetwork(new("active","EDIÇÃO DE DEMONSTRAÇÃO","MERCADO DEMONSTRAÇÃO","00000000000191",DateTime.UtcNow.AddYears(10).ToString("O"),false,true,Showcase:true));
 #if DEBUG
         if(Environment.GetEnvironmentVariable("MONALISA_LICENSE_DISABLED")=="1")return WithCurrentNetwork(new("active","MODO LOCAL DE DESENVOLVIMENTO","DESENVOLVIMENTO","",DateTime.UtcNow.AddDays(1).ToString("O"),false,true));
 #endif
@@ -77,11 +78,22 @@ sealed class LicenseGuard {
         var key=activationKey?.Trim().ToUpperInvariant()??"";if(!key.StartsWith("MLF-")||key.Length<20)throw new ArgumentException("Informe uma chave de ativação válida.");
         if(stored.ProtectedKey.Length==0)return await Activate(key);
         var oldKey=Unprotect(stored.ProtectedKey);if(string.Equals(oldKey,key,StringComparison.OrdinalIgnoreCase))return await Status(true);
-        var release=await client.PostAsJsonAsync($"{serverUrl}/api/license/release",new{key=oldKey,installationId});
-        var releaseBody=await release.Content.ReadFromJsonAsync<JsonElement>();if(!release.IsSuccessStatusCode)throw new ArgumentException(releaseBody.TryGetProperty("error",out var error)?error.GetString()??"Não foi possível liberar a licença atual.":"Não foi possível liberar a licença atual.");
+        HttpResponseMessage release;
+        try { release=await client.PostAsJsonAsync($"{serverUrl}/api/license/release",new{key=oldKey,installationId}); }
+        catch(HttpRequestException) { throw new ArgumentException("Não foi possível acessar o Painel Central para trocar a licença. Confirme se este computador está na mesma rede do painel."); }
+        catch(TaskCanceledException) { throw new ArgumentException("O Painel Central demorou para responder. Confirme a conexão de rede e tente novamente."); }
+        var releaseError=await ReadServerError(release,"Não foi possível liberar a licença atual.");
+        if(!release.IsSuccessStatusCode)throw new ArgumentException(releaseError);
         var previous=stored;stored=stored with{ProtectedKey=Protect(key),Token="",LastCheck=""};Save();cached=null;
         try {var result=await Status(true);if(result.Status is "activation_required" or "blocked"||result.Offline)throw new ArgumentException(result.Message);return result;}
         catch {stored=previous;Save();cached=null;try{await Status(true);}catch{}throw;}
+    }
+
+    static async Task<string> ReadServerError(HttpResponseMessage response,string fallback) {
+        try {
+            var body=await response.Content.ReadFromJsonAsync<JsonElement>();
+            return body.ValueKind==JsonValueKind.Object&&body.TryGetProperty("error",out var error)?error.GetString()??fallback:fallback;
+        } catch { return fallback; }
     }
 
     bool SaveClientNetwork(string server,string key){var normalized=server.Trim().TrimEnd('/');var currentRole=(Environment.GetEnvironmentVariable("MONALISA_NETWORK_ROLE")??"standalone").Trim().ToLowerInvariant();var currentServer=(Environment.GetEnvironmentVariable("MONALISA_DATA_SERVER_URL")??"").Trim().TrimEnd('/');var currentKey=(Environment.GetEnvironmentVariable("MONALISA_NETWORK_KEY")??"").Trim();Directory.CreateDirectory(configurationRoot);File.WriteAllText(Path.Combine(configurationRoot,"network-role.txt"),"client",Encoding.ASCII);File.WriteAllText(Path.Combine(configurationRoot,"network-server.txt"),normalized,Encoding.ASCII);File.WriteAllText(Path.Combine(configurationRoot,"network-key.txt"),key,Encoding.ASCII);return currentRole!="client"||!string.Equals(currentServer,normalized,StringComparison.OrdinalIgnoreCase)||!string.Equals(currentKey,key,StringComparison.Ordinal);}

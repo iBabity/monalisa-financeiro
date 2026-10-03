@@ -10,6 +10,18 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$defaultInstallRoot = Join-Path $env:ProgramFiles 'Monalisa Financeiro'
+$defaultDataRoot = Join-Path $env:ProgramData 'Monalisa Financeiro\data'
+$showcaseEdition = $PreparedPayloadDirectory -and (Test-Path -LiteralPath (Join-Path $PreparedPayloadDirectory 'showcase-edition.txt'))
+if ($showcaseEdition) {
+    if ([IO.Path]::GetFullPath($InstallRoot).TrimEnd('\') -eq [IO.Path]::GetFullPath($defaultInstallRoot).TrimEnd('\')) {
+        $InstallRoot = Join-Path $env:ProgramFiles 'Monalisa Financeiro Demonstracao'
+    }
+    if ([IO.Path]::GetFullPath($DataRoot).TrimEnd('\') -eq [IO.Path]::GetFullPath($defaultDataRoot).TrimEnd('\')) {
+        $DataRoot = Join-Path $env:ProgramData 'Monalisa Financeiro Demonstracao\data'
+    }
+    $LicenseServerUrl = ''
+}
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
 $DataRoot = [IO.Path]::GetFullPath($DataRoot).TrimEnd('\')
 $protectedRoots = @(
@@ -147,20 +159,22 @@ if (-not $PreparedPayloadDirectory -and -not (Test-Path -LiteralPath $PayloadZip
     throw "PACOTE DO MONALISA FINANCEIRO NÃO ENCONTRADO: $PayloadZip"
 }
 
-if (-not $LicenseServerUrl) { throw 'O INSTALADOR NÃO POSSUI O ENDEREÇO DO PAINEL CENTRAL.' }
-$licenseUri = $null
-if (-not [Uri]::TryCreate($LicenseServerUrl, [UriKind]::Absolute, [ref]$licenseUri)) { throw 'ENDEREÇO DO PAINEL CENTRAL INVÁLIDO.' }
-$isLocal = $licenseUri.Host -in @('127.0.0.1', 'localhost')
-$ipAddress = $null
-$isPrivateNetwork = [Net.IPAddress]::TryParse($licenseUri.Host, [ref]$ipAddress) -and (
-    $ipAddress.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork -and (
-        $ipAddress.GetAddressBytes()[0] -eq 10 -or
-        ($ipAddress.GetAddressBytes()[0] -eq 172 -and $ipAddress.GetAddressBytes()[1] -ge 16 -and $ipAddress.GetAddressBytes()[1] -le 31) -or
-        ($ipAddress.GetAddressBytes()[0] -eq 192 -and $ipAddress.GetAddressBytes()[1] -eq 168)
+if (-not $showcaseEdition) {
+    if (-not $LicenseServerUrl) { throw 'O INSTALADOR NÃO POSSUI O ENDEREÇO DO PAINEL CENTRAL.' }
+    $licenseUri = $null
+    if (-not [Uri]::TryCreate($LicenseServerUrl, [UriKind]::Absolute, [ref]$licenseUri)) { throw 'ENDEREÇO DO PAINEL CENTRAL INVÁLIDO.' }
+    $isLocal = $licenseUri.Host -in @('127.0.0.1', 'localhost')
+    $ipAddress = $null
+    $isPrivateNetwork = [Net.IPAddress]::TryParse($licenseUri.Host, [ref]$ipAddress) -and (
+        $ipAddress.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork -and (
+            $ipAddress.GetAddressBytes()[0] -eq 10 -or
+            ($ipAddress.GetAddressBytes()[0] -eq 172 -and $ipAddress.GetAddressBytes()[1] -ge 16 -and $ipAddress.GetAddressBytes()[1] -le 31) -or
+            ($ipAddress.GetAddressBytes()[0] -eq 192 -and $ipAddress.GetAddressBytes()[1] -eq 168)
+        )
     )
-)
-if ($licenseUri.Scheme -ne 'https' -and -not $isLocal -and -not $isPrivateNetwork) { throw 'FORA DA REDE LOCAL, O PAINEL CENTRAL PRECISA USAR HTTPS.' }
-$LicenseServerUrl = $LicenseServerUrl.TrimEnd('/')
+    if ($licenseUri.Scheme -ne 'https' -and -not $isLocal -and -not $isPrivateNetwork) { throw 'FORA DA REDE LOCAL, O PAINEL CENTRAL PRECISA USAR HTTPS.' }
+    $LicenseServerUrl = $LicenseServerUrl.TrimEnd('/')
+}
 
 $staging = if ($PreparedPayloadDirectory) { [IO.Path]::GetFullPath($PreparedPayloadDirectory) } else { Join-Path $env:TEMP ('monalisa-install-' + [Guid]::NewGuid().ToString('N')) }
 $removeStaging = -not [bool]$PreparedPayloadDirectory
@@ -196,16 +210,19 @@ try {
 
     $configurationRoot = Split-Path $DataRoot -Parent
     New-Item -ItemType Directory -Path $configurationRoot -Force | Out-Null
-    Set-Content -LiteralPath (Join-Path $configurationRoot 'license-server.txt') -Value $LicenseServerUrl -Encoding ascii
+    if (-not $showcaseEdition) {
+        Set-Content -LiteralPath (Join-Path $configurationRoot 'license-server.txt') -Value $LicenseServerUrl -Encoding ascii
+    }
 
     $applicationPath = Join-Path $InstallRoot 'MonalisaFinanceiro.exe'
     if (-not (Test-Path -LiteralPath $applicationPath)) { throw 'O EXECUTÁVEL DO APLICATIVO WINDOWS NÃO FOI ENCONTRADO.' }
 
     if (-not $NoShortcuts) {
         $wsh = New-Object -ComObject WScript.Shell
+        $productName = if ($showcaseEdition) { 'Monalisa Financeiro Demonstracao' } else { 'Monalisa Financeiro' }
         $shortcutTargets = @(
-            (Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) 'Monalisa Financeiro.lnk'),
-            (Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'Monalisa Financeiro.lnk')
+            (Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) ($productName + '.lnk')),
+            (Join-Path ([Environment]::GetFolderPath('CommonPrograms')) ($productName + '.lnk'))
         )
         foreach ($shortcutPath in $shortcutTargets) {
             $shortcut = $wsh.CreateShortcut($shortcutPath)
@@ -213,10 +230,11 @@ try {
             $shortcut.Arguments = ''
             $shortcut.WorkingDirectory = $InstallRoot
             $shortcut.IconLocation = $applicationPath + ',0'
-            $shortcut.Description = 'MONALISA FINANCEIRO'
+            $shortcut.Description = if ($showcaseEdition) { 'MONALISA FINANCEIRO - DEMONSTRAÇÃO' } else { 'MONALISA FINANCEIRO' }
             $shortcut.Save()
         }
-        $networkShortcutPath = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'Configurar rede do Monalisa Financeiro.lnk'
+        $networkShortcutName = if ($showcaseEdition) { 'Configurar rede do Monalisa Financeiro Demonstracao.lnk' } else { 'Configurar rede do Monalisa Financeiro.lnk' }
+        $networkShortcutPath = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) $networkShortcutName
         $networkShortcut = $wsh.CreateShortcut($networkShortcutPath)
         $networkShortcut.TargetPath = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
         $networkShortcut.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $InstallRoot 'Configurar-Rede-Financeira.ps1') + '"'
@@ -229,9 +247,9 @@ try {
     if (-not $NoLaunch -or -not $NoShortcuts) {
         Add-Type -AssemblyName PresentationFramework
         $successMessage = if ($restartRequired) {
-            'MONALISA FINANCEIRO INSTALADO. REINICIE O WINDOWS ANTES DE ABRIR O PROGRAMA.'
+            if ($showcaseEdition) { 'MONALISA FINANCEIRO - DEMONSTRAÇÃO INSTALADO. REINICIE O WINDOWS ANTES DE ABRIR O PROGRAMA.' } else { 'MONALISA FINANCEIRO INSTALADO. REINICIE O WINDOWS ANTES DE ABRIR O PROGRAMA.' }
         } else {
-            'MONALISA FINANCEIRO INSTALADO COM SUCESSO. AO CLICAR EM OK, O SISTEMA SERÁ ABERTO.'
+            if ($showcaseEdition) { 'MONALISA FINANCEIRO - DEMONSTRAÇÃO INSTALADO COM SUCESSO. AO CLICAR EM OK, O SISTEMA SERÁ ABERTO.' } else { 'MONALISA FINANCEIRO INSTALADO COM SUCESSO. AO CLICAR EM OK, O SISTEMA SERÁ ABERTO.' }
         }
         [System.Windows.MessageBox]::Show($successMessage, 'MONALISA FINANCEIRO') | Out-Null
     }

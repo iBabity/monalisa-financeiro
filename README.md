@@ -1,8 +1,10 @@
 # Monalisa Financeiro
 
-Versão atual: **1.1.13**.
+Versão atual: **1.1.16**.
 
 Aplicação independente para testar o ciclo financeiro com acesso por pessoa e empresa. Interface Flutter, API C#/.NET 10, SQLite. Identidade baseada na imagem fornecida e padrões de interface do Pedido de Compra. O projeto anterior não foi alterado; suas entidades de compras não são reutilizadas como entidades financeiras.
+
+Na tela **A pagar**, o botão **Baixar pelo OFX** importa extratos bancários, identifica débitos pelo `FITID`, sugere contas em aberto por valor, data, fornecedor e descrição e somente registra as baixas escolhidas pelo usuário. A primeira versão foi validada com OFX de conta corrente do Banco Itaú.
 
 ## Abrir
 
@@ -19,6 +21,10 @@ O usuário reservado `ADMIN` e a senha mestra diária funcionam somente no Paine
 O instalador pronto fica em `artifacts\installer\Monalisa-Financeiro-Setup.exe`. Para gerar uma nova versão localmente, execute `.\installer\package-installer.ps1`.
 
 O pacote não inclui o banco de desenvolvimento nem uma chave de licença. Consulte `docs\INSTALACAO-E-ATIVACAO.md` para o fluxo de instalação, ativação, troca e bloqueio de máquinas.
+
+Para apresentações sem controle de licença, gere a edição de demonstração com
+`.\installer\package-showcase.ps1`. Ela usa pastas próprias e não interfere na
+instalação comercial. Consulte `docs\EDICAO-DEMONSTRACAO.md`.
 
 ## Implementado
 

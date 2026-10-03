@@ -3,7 +3,8 @@ param(
     [string]$BuildName = '',
     [string]$BuildNumber = '',
     [string]$FileName = 'Monalisa-Financeiro-Setup.exe',
-    [string]$LicenseServerUrl = 'https://licencas.monalisasistemas.com.br'
+    [string]$LicenseServerUrl = 'https://licencas.monalisasistemas.com.br',
+    [switch]$Showcase
 )
 
 $ErrorActionPreference = 'Stop'
@@ -14,6 +15,9 @@ $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $buildRoot = Join-Path $projectRoot 'tmp\installer-build'
 $publishRoot = Join-Path $buildRoot 'publish'
 $sourceRoot = Join-Path $buildRoot 'setup-source'
+if ($Showcase -and $FileName -eq 'Monalisa-Financeiro-Setup.exe') {
+    $FileName = 'Monalisa-Financeiro-Demonstracao-Setup.exe'
+}
 $setupPath = Join-Path $OutputDirectory $FileName
 $redistCache = Join-Path $projectRoot '.tools\VC_redist.x64.exe'
 $fullProjectRoot = [IO.Path]::GetFullPath($projectRoot).TrimEnd('\')
@@ -42,6 +46,9 @@ $windowsBundle = Join-Path $projectRoot 'app\build\windows\x64\runner\Release'
 if (-not (Test-Path -LiteralPath (Join-Path $windowsBundle 'MonalisaFinanceiro.exe'))) { throw 'O EXECUTÁVEL WINDOWS NÃO FOI GERADO.' }
 Copy-Item -Path (Join-Path $windowsBundle '*') -Destination $publishRoot -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'configure-network.ps1') -Destination (Join-Path $publishRoot 'Configurar-Rede-Financeira.ps1') -Force
+if ($Showcase) {
+    Set-Content -LiteralPath (Join-Path $publishRoot 'showcase-edition.txt') -Value 'MONALISA FINANCEIRO - EDICAO DE DEMONSTRACAO' -Encoding ascii
+}
 
 if (-not (Test-Path -LiteralPath $redistCache)) {
     New-Item -ItemType Directory -Path (Split-Path $redistCache -Parent) -Force | Out-Null

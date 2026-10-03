@@ -33,15 +33,24 @@ std::filesystem::path ExecutableDirectory() {
   return std::filesystem::path(std::wstring(buffer.data(), length)).parent_path();
 }
 
+bool ShowcaseEdition(const std::filesystem::path& directory) {
+  return std::filesystem::exists(directory / L"showcase-edition.txt");
+}
+
 std::filesystem::path ProgramDataDirectory() {
   std::vector<wchar_t> buffer(32768);
   const DWORD length = GetEnvironmentVariableW(
       L"ProgramData", buffer.data(), static_cast<DWORD>(buffer.size()));
   if (length == 0 || length >= static_cast<DWORD>(buffer.size())) {
-    return std::filesystem::path(L"C:\\ProgramData") / L"Monalisa Financeiro";
+    return std::filesystem::path(L"C:\\ProgramData") /
+           (ShowcaseEdition(ExecutableDirectory())
+                ? L"Monalisa Financeiro Demonstracao"
+                : L"Monalisa Financeiro");
   }
   return std::filesystem::path(std::wstring(buffer.data(), length)) /
-         L"Monalisa Financeiro";
+         (ShowcaseEdition(ExecutableDirectory())
+              ? L"Monalisa Financeiro Demonstracao"
+              : L"Monalisa Financeiro");
 }
 
 std::wstring EnvironmentValue(const wchar_t* name) {
@@ -741,6 +750,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   }
   ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
+  const bool showcase = ShowcaseEdition(ExecutableDirectory());
+  if (showcase) SetEnvironmentVariableW(L"MONALISA_SHOWCASE", L"1");
   SetEnvironmentVariableW(L"MONALISA_APP_VERSION", Wide(FLUTTER_VERSION).c_str());
   const auto configuration_directory = ProgramDataDirectory();
   const auto license_server = EnvironmentValue(L"MONALISA_LICENSE_URL").empty()
@@ -751,8 +762,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
       EnvironmentValue(L"MONALISA_UPDATE_MANIFEST_URL").empty()
           ? L"https://raw.githubusercontent.com/iBabity/monalisa-financeiro-updates/main/manifest.json"
           : EnvironmentValue(L"MONALISA_UPDATE_MANIFEST_URL");
-  const auto update = ApplyMandatoryUpdate(ExecutableDirectory(), license_server,
-                                           public_update_manifest);
+  const auto update = showcase
+                          ? UpdateResult::none
+                          : ApplyMandatoryUpdate(ExecutableDirectory(),
+                                                 license_server,
+                                                 public_update_manifest);
   if (update != UpdateResult::none) {
     ::CoUninitialize();
     return update == UpdateResult::started ? EXIT_SUCCESS : EXIT_FAILURE;
@@ -771,7 +785,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   FlutterWindow window(project);
   Win32Window::Point origin(40, 40);
   Win32Window::Size size(1280, 760);
-  if (!window.Create(L"Monalisa Financeiro", origin, size)) {
+  if (!window.Create(showcase ? L"Monalisa Financeiro - Demonstração"
+                              : L"Monalisa Financeiro",
+                     origin, size)) {
     CloseServer(server);
     ::CoUninitialize();
     return EXIT_FAILURE;

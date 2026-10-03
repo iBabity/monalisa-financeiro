@@ -2,6 +2,12 @@
 
 ## Versões iniciais
 
+- `1.1.16`: edição de demonstração independente, sem ativação de licença e
+  sem atualização obrigatória, instalada em pastas separadas da edição comercial.
+- `1.1.15`: monitoramento moderno de contas a receber por cliente, com alertas
+  por atraso, pesquisa, totais e acesso direto à baixa das parcelas.
+- `1.1.14`: conciliação de contas a pagar por extrato OFX, com sugestões,
+  confirmação das baixas, proteção contra movimentações duplicadas e estorno.
 - `1.1.0`: versão-base usada para instalar e testar o atualizador.
 - `1.1.1`: primeira atualização obrigatória publicada pelo Painel Central.
 - `1.1.2` a `1.1.7`: validações do instalador, atualização fora da rede local,
@@ -57,4 +63,4 @@ abertura até uma nova tentativa.
 O instalador `Monalisa-Financeiro-Teste-Base-1.1.0.exe` aponta para o Painel
 Central em `http://127.0.0.1:5200` e deve ser usado apenas na mesma máquina do
 painel. Para testar uma atualização, publique no painel uma versão superior à
-instalada. A versão `1.1.13` é a referência atual deste projeto.
+instalada. A versão `1.1.16` é a referência atual deste projeto.

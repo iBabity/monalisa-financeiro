@@ -183,7 +183,12 @@ class FinanceApi {
     try {
       body = jsonDecode(utf8.decode(response.bodyBytes));
     } catch (_) {
-      throw Exception('O serviço local não respondeu corretamente.');
+      if (response.statusCode >= 500) {
+        throw Exception(
+          'O serviço local encontrou um erro ao concluir a operação. Feche e abra o Monalisa Financeiro e tente novamente.',
+        );
+      }
+      throw Exception('O serviço local devolveu uma resposta inválida.');
     }
     if (response.statusCode >= 400) {
       throw Exception(

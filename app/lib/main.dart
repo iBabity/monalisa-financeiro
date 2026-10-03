@@ -557,6 +557,31 @@ class _WorkspaceState extends State<Workspace> {
                                   ),
                                 ),
                               ),
+                            if (license['showcase'] == true) ...[
+                              const SizedBox(width: 14),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 5,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: orange.withValues(alpha: .12),
+                                  borderRadius: BorderRadius.circular(20),
+                                  border: Border.all(
+                                    color: orange.withValues(alpha: .35),
+                                  ),
+                                ),
+                                child: const Text(
+                                  'DEMONSTRAÇÃO',
+                                  style: TextStyle(
+                                    color: orange,
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w800,
+                                    letterSpacing: .5,
+                                  ),
+                                ),
+                              ),
+                            ],
                             const Spacer(),
                             IconButton(
                               tooltip: 'Diminuir letras',
@@ -836,6 +861,19 @@ class _WorkspaceState extends State<Workspace> {
                                                     'Relatórios',
                                                   ),
                                                 ),
+                                              if (page == 2)
+                                                FilledButton.icon(
+                                                  onPressed:
+                                                      showReceivablesMonitor,
+                                                  icon: const Icon(
+                                                    Icons
+                                                        .monitor_heart_outlined,
+                                                    size: 19,
+                                                  ),
+                                                  label: const Text(
+                                                    'Monitoramento',
+                                                  ),
+                                                ),
                                             ],
                                           ),
                                       ],
@@ -864,6 +902,15 @@ class _WorkspaceState extends State<Workspace> {
                                 ),
                               ),
                       ),
+                      if (page == 1)
+                        FilledButton.icon(
+                          onPressed: importOfxPayables,
+                          icon: const Icon(
+                            Icons.upload_file_outlined,
+                            size: 19,
+                          ),
+                          label: const Text('Baixar pelo OFX'),
+                        ),
                     ],
                   ),
                 ),
@@ -1941,6 +1988,838 @@ class _WorkspaceState extends State<Workspace> {
                 .toList(),
           ),
   );
+
+  Future<void> showReceivablesMonitor() async {
+    final receivables = titles
+        .where(
+          (title) => title['kind'] == 'receivable' && title['cancelled'] == 0,
+        )
+        .toList();
+    if (receivables.isEmpty) {
+      message('AINDA NÃO HÁ CONTAS A RECEBER PARA MONITORAR.');
+      return;
+    }
+
+    final today = DateUtils.dateOnly(DateTime.now());
+    final monthStart = DateTime(today.year, today.month, 1);
+    final nextMonth = DateTime(today.year, today.month + 1, 1);
+    final grouped = <String, List<RecordData>>{};
+    for (final title in receivables) {
+      final partyId = title['partyId'];
+      final name = '${title['partyName'] ?? 'SEM CLIENTE VINCULADO'}';
+      final key = partyId == null ? 'SEM CLIENTE:$name' : 'CLIENTE:$partyId';
+      grouped.putIfAbsent(key, () => []).add(title);
+    }
+
+    RecordData? partyFor(List<RecordData> clientTitles) {
+      final partyId = clientTitles.first['partyId'];
+      if (partyId == null) return null;
+      for (final party in parties) {
+        if (party['id'] == partyId) return party;
+      }
+      return null;
+    }
+
+    num cashValue(RecordData settlement) =>
+        (settlement['principal'] as num) +
+        (settlement['interest'] as num) +
+        (settlement['penalty'] as num) +
+        ((settlement['additional'] ?? 0) as num) -
+        (settlement['discount'] as num);
+
+    final clients =
+        grouped.entries.map((entry) {
+          final clientTitles = entry.value;
+          final party = partyFor(clientTitles);
+          final openTitles =
+              clientTitles
+                  .where((title) => (title['remaining'] as num) > 0)
+                  .toList()
+                ..sort((a, b) => '${a['due']}'.compareTo('${b['due']}'));
+          final receivedTitles =
+              clientTitles
+                  .where((title) => (title['remaining'] as num) <= 0)
+                  .toList()
+                ..sort((a, b) => '${b['due']}'.compareTo('${a['due']}'));
+          final ids = clientTitles.map((title) => title['id']).toSet();
+          final clientSettlements = settlements
+              .where(
+                (settlement) =>
+                    settlement['reversed'] != 1 &&
+                    ids.contains(settlement['titleId']),
+              )
+              .toList();
+          final overdueTitles = openTitles.where(
+            (title) => DateTime.parse('${title['due']}').isBefore(today),
+          );
+          var maximumDelay = 0;
+          for (final title in overdueTitles) {
+            final days = today
+                .difference(DateTime.parse('${title['due']}'))
+                .inDays;
+            if (days > maximumDelay) maximumDelay = days;
+          }
+          final openAmount = openTitles.fold<num>(
+            0,
+            (sum, title) => sum + (title['remaining'] as num),
+          );
+          final overdueAmount = overdueTitles.fold<num>(
+            0,
+            (sum, title) => sum + (title['remaining'] as num),
+          );
+          final receivedAmount = clientSettlements.fold<num>(
+            0,
+            (sum, settlement) => sum + cashValue(settlement),
+          );
+          final receivedThisMonth = clientSettlements
+              .where((settlement) {
+                final date = DateTime.parse('${settlement['date']}');
+                return !date.isBefore(monthStart) && date.isBefore(nextMonth);
+              })
+              .fold<num>(0, (sum, settlement) => sum + cashValue(settlement));
+          return <String, dynamic>{
+            'key': entry.key,
+            'name':
+                '${clientTitles.first['partyName'] ?? 'SEM CLIENTE VINCULADO'}',
+            'party': party,
+            'titles': clientTitles,
+            'openTitles': openTitles,
+            'receivedTitles': receivedTitles,
+            'settlements': clientSettlements,
+            'openAmount': openAmount,
+            'overdueAmount': overdueAmount,
+            'receivedAmount': receivedAmount,
+            'receivedThisMonth': receivedThisMonth,
+            'maximumDelay': maximumDelay,
+          };
+        }).toList()..sort((a, b) {
+          final byDelay = (b['maximumDelay'] as int).compareTo(
+            a['maximumDelay'] as int,
+          );
+          if (byDelay != 0) return byDelay;
+          return '${a['name']}'.compareTo('${b['name']}');
+        });
+
+    String searchText = '';
+    String clientFilter = 'Todos';
+    String detailView = 'open';
+    String? selectedKey = clients.first['key'] as String;
+
+    Color alertColor(int delay, num openAmount) {
+      if (delay > 30) return const Color(0xFFB54235);
+      if (delay > 0) return const Color(0xFFD28A20);
+      if (openAmount > 0) return const Color(0xFF2E8B67);
+      return const Color(0xFF73807D);
+    }
+
+    String alertLabel(int delay, num openAmount) {
+      if (delay > 30) return 'ATRASO CRÍTICO';
+      if (delay > 0) return 'EM ATRASO';
+      if (openAmount > 0) return 'EM DIA';
+      return 'RECEBIDO';
+    }
+
+    final selectedTitle = await showDialog<RecordData>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setLocal) {
+          final query = searchText.trim().toLowerCase();
+          final visible = clients.where((client) {
+            final party = client['party'] as RecordData?;
+            final searchable =
+                '${client['name']} ${party?['document'] ?? ''} ${party?['phone'] ?? ''} ${party?['email'] ?? ''} ${(client['titles'] as List<RecordData>).map((title) => title['description']).join(' ')}'
+                    .toLowerCase();
+            final delay = client['maximumDelay'] as int;
+            final openAmount = client['openAmount'] as num;
+            final receivedTitles = client['receivedTitles'] as List<RecordData>;
+            final matchesFilter = switch (clientFilter) {
+              'Em atraso' => delay > 0,
+              'Em dia' => delay == 0 && openAmount > 0,
+              'Recebidos' => openAmount == 0 && receivedTitles.isNotEmpty,
+              _ => true,
+            };
+            return matchesFilter &&
+                (query.isEmpty || searchable.contains(query));
+          }).toList();
+          if (visible.isNotEmpty &&
+              !visible.any((client) => client['key'] == selectedKey)) {
+            selectedKey = visible.first['key'] as String;
+          }
+          final selected = visible
+              .where((client) => client['key'] == selectedKey)
+              .firstOrNull;
+
+          Widget metricCard(
+            String label,
+            num value,
+            IconData icon,
+            Color color,
+          ) => Container(
+            constraints: const BoxConstraints(minWidth: 165),
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: .08),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: color.withValues(alpha: .18)),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 38,
+                  height: 38,
+                  decoration: BoxDecoration(
+                    color: color.withValues(alpha: .13),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(icon, color: color, size: 20),
+                ),
+                const SizedBox(width: 12),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      label,
+                      style: TextStyle(fontSize: 11, color: mutedText),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      money(value),
+                      style: TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.w800,
+                        color: color,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          );
+
+          Widget clientList() => Container(
+            width: 365,
+            decoration: BoxDecoration(
+              color: Theme.of(dialogContext).colorScheme.surfaceContainerLow,
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(
+                color: Theme.of(dialogContext).dividerColor
+                    .withValues(alpha: .4),
+              ),
+            ),
+            child: Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(14),
+                  child: Column(
+                    children: [
+                      TextField(
+                        decoration: const InputDecoration(
+                          hintText: 'Buscar cliente, documento ou título',
+                          prefixIcon: Icon(Icons.search),
+                        ),
+                        onChanged: (value) => setLocal(() {
+                          searchText = value;
+                        }),
+                      ),
+                      const SizedBox(height: 10),
+                      DropdownButtonFormField<String>(
+                        initialValue: clientFilter,
+                        decoration: const InputDecoration(
+                          labelText: 'Mostrar clientes',
+                        ),
+                        items: const [
+                          DropdownMenuItem(
+                            value: 'Todos',
+                            child: Text('Todos'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'Em atraso',
+                            child: Text('Em atraso'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'Em dia',
+                            child: Text('Em dia'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'Recebidos',
+                            child: Text('Recebidos'),
+                          ),
+                        ],
+                        onChanged: (value) => setLocal(() {
+                          clientFilter = value ?? 'Todos';
+                        }),
+                      ),
+                    ],
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+                  child: Row(
+                    children: [
+                      Text(
+                        '${visible.length} CLIENTE(S)',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          color: mutedText,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Expanded(
+                  child: visible.isEmpty
+                      ? Center(
+                          child: Text(
+                            'Nenhum cliente encontrado.',
+                            style: TextStyle(color: mutedText),
+                          ),
+                        )
+                      : ListView.separated(
+                          padding: const EdgeInsets.fromLTRB(8, 0, 8, 10),
+                          itemCount: visible.length,
+                          separatorBuilder: (_, _) => const SizedBox(height: 6),
+                          itemBuilder: (_, index) {
+                            final client = visible[index];
+                            final delay = client['maximumDelay'] as int;
+                            final openAmount = client['openAmount'] as num;
+                            final color = alertColor(delay, openAmount);
+                            final active = client['key'] == selectedKey;
+                            return Material(
+                              color: active
+                                  ? teal.withValues(alpha: .10)
+                                  : Colors.transparent,
+                              borderRadius: BorderRadius.circular(14),
+                              child: InkWell(
+                                borderRadius: BorderRadius.circular(14),
+                                onTap: () => setLocal(() {
+                                  selectedKey = client['key'] as String;
+                                  detailView =
+                                      (client['openTitles'] as List).isEmpty
+                                      ? 'received'
+                                      : 'open';
+                                }),
+                                child: Padding(
+                                  padding: const EdgeInsets.all(13),
+                                  child: Row(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Container(
+                                        width: 10,
+                                        height: 10,
+                                        margin: const EdgeInsets.only(top: 5),
+                                        decoration: BoxDecoration(
+                                          color: color,
+                                          shape: BoxShape.circle,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 10),
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              '${client['name']}',
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: const TextStyle(
+                                                fontWeight: FontWeight.w700,
+                                              ),
+                                            ),
+                                            const SizedBox(height: 5),
+                                            Text(
+                                              alertLabel(delay, openAmount),
+                                              style: TextStyle(
+                                                color: color,
+                                                fontSize: 10,
+                                                fontWeight: FontWeight.w800,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                      const SizedBox(width: 8),
+                                      Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.end,
+                                        children: [
+                                          Text(
+                                            money(openAmount),
+                                            style: const TextStyle(
+                                              fontWeight: FontWeight.w700,
+                                            ),
+                                          ),
+                                          if (delay > 0)
+                                            Text(
+                                              '$delay DIA(S)',
+                                              style: TextStyle(
+                                                color: color,
+                                                fontSize: 10,
+                                              ),
+                                            ),
+                                        ],
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                ),
+              ],
+            ),
+          );
+
+          Widget compactClientPicker() => Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Theme.of(dialogContext).colorScheme.surfaceContainerLow,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(
+                color: Theme.of(dialogContext).dividerColor
+                    .withValues(alpha: .4),
+              ),
+            ),
+            child: Column(
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        decoration: const InputDecoration(
+                          hintText: 'Buscar cliente ou título',
+                          prefixIcon: Icon(Icons.search),
+                        ),
+                        onChanged: (value) => setLocal(() {
+                          searchText = value;
+                        }),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: DropdownButtonFormField<String>(
+                        initialValue: clientFilter,
+                        decoration: const InputDecoration(
+                          labelText: 'Situação',
+                        ),
+                        items: const [
+                          DropdownMenuItem(
+                            value: 'Todos',
+                            child: Text('Todos'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'Em atraso',
+                            child: Text('Em atraso'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'Em dia',
+                            child: Text('Em dia'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'Recebidos',
+                            child: Text('Recebidos'),
+                          ),
+                        ],
+                        onChanged: (value) => setLocal(() {
+                          clientFilter = value ?? 'Todos';
+                        }),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                DropdownButtonFormField<String>(
+                  key: ValueKey('$selectedKey-${visible.length}'),
+                  initialValue: selected == null ? null : selectedKey,
+                  isExpanded: true,
+                  decoration: InputDecoration(
+                    labelText: visible.isEmpty
+                        ? 'Nenhum cliente encontrado'
+                        : 'Cliente (${visible.length})',
+                    prefixIcon: const Icon(Icons.person_search_outlined),
+                  ),
+                  items: visible
+                      .map(
+                        (client) => DropdownMenuItem<String>(
+                          value: client['key'] as String,
+                          child: Text(
+                            '${client['name']}  •  ${money(client['openAmount'] as num)}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      )
+                      .toList(),
+                  onChanged: visible.isEmpty
+                      ? null
+                      : (value) => setLocal(() {
+                          selectedKey = value;
+                          final client = visible.firstWhere(
+                            (item) => item['key'] == value,
+                          );
+                          detailView = (client['openTitles'] as List).isEmpty
+                              ? 'received'
+                              : 'open';
+                        }),
+                ),
+              ],
+            ),
+          );
+
+          Widget clientDetails() {
+            if (selected == null) {
+              return Expanded(
+                child: Center(
+                  child: Text(
+                    'Selecione um cliente para ver os detalhes.',
+                    style: TextStyle(color: mutedText),
+                  ),
+                ),
+              );
+            }
+            final party = selected['party'] as RecordData?;
+            final openTitles = selected['openTitles'] as List<RecordData>;
+            final receivedTitles =
+                selected['receivedTitles'] as List<RecordData>;
+            final displayed = detailView == 'open'
+                ? openTitles
+                : receivedTitles;
+            String latestReceipt(RecordData title) {
+              final dates =
+                  (selected['settlements'] as List<RecordData>)
+                      .where(
+                        (settlement) => settlement['titleId'] == title['id'],
+                      )
+                      .map((settlement) => '${settlement['date']}')
+                      .toList()
+                    ..sort();
+              return dates.isEmpty ? '' : dates.last;
+            }
+
+            return Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(18),
+                    decoration: BoxDecoration(
+                      color: teal.withValues(alpha: .06),
+                      borderRadius: BorderRadius.circular(18),
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 48,
+                          height: 48,
+                          decoration: BoxDecoration(
+                            color: teal.withValues(alpha: .13),
+                            shape: BoxShape.circle,
+                          ),
+                          child: const Icon(Icons.person_outline, color: teal),
+                        ),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                '${selected['name']}',
+                                style: const TextStyle(
+                                  fontSize: 20,
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                              const SizedBox(height: 5),
+                              Text(
+                                [
+                                      if ('${party?['document'] ?? ''}'
+                                          .isNotEmpty)
+                                        maskedDocument('${party?['document']}'),
+                                      if ('${party?['phone'] ?? ''}'.isNotEmpty)
+                                        '${party?['phone']}',
+                                      if ('${party?['email'] ?? ''}'.isNotEmpty)
+                                        '${party?['email']}',
+                                    ].isEmpty
+                                    ? 'SEM DADOS DE CONTATO CADASTRADOS'
+                                    : [
+                                        if ('${party?['document'] ?? ''}'
+                                            .isNotEmpty)
+                                          maskedDocument(
+                                            '${party?['document']}',
+                                          ),
+                                        if ('${party?['phone'] ?? ''}'
+                                            .isNotEmpty)
+                                          '${party?['phone']}',
+                                        if ('${party?['email'] ?? ''}'
+                                            .isNotEmpty)
+                                          '${party?['email']}',
+                                      ].join('  •  '),
+                                style: TextStyle(
+                                  color: mutedText,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 10,
+                    runSpacing: 10,
+                    children: [
+                      metricCard(
+                        'EM ABERTO',
+                        selected['openAmount'] as num,
+                        Icons.schedule_outlined,
+                        teal,
+                      ),
+                      metricCard(
+                        'VENCIDO',
+                        selected['overdueAmount'] as num,
+                        Icons.warning_amber_rounded,
+                        const Color(0xFFB54235),
+                      ),
+                      metricCard(
+                        'RECEBIDO NO MÊS',
+                        selected['receivedThisMonth'] as num,
+                        Icons.check_circle_outline,
+                        const Color(0xFF2E8B67),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  SegmentedButton<String>(
+                    segments: [
+                      ButtonSegment(
+                        value: 'open',
+                        icon: const Icon(Icons.schedule_outlined),
+                        label: Text('Em aberto (${openTitles.length})'),
+                      ),
+                      ButtonSegment(
+                        value: 'received',
+                        icon: const Icon(Icons.check_circle_outline),
+                        label: Text('Recebidas (${receivedTitles.length})'),
+                      ),
+                    ],
+                    selected: {detailView},
+                    onSelectionChanged: (value) => setLocal(() {
+                      detailView = value.first;
+                    }),
+                  ),
+                  const SizedBox(height: 10),
+                  Expanded(
+                    child: displayed.isEmpty
+                        ? Center(
+                            child: Text(
+                              detailView == 'open'
+                                  ? 'Este cliente não possui parcelas em aberto.'
+                                  : 'Este cliente ainda não possui parcelas recebidas.',
+                              style: TextStyle(color: mutedText),
+                            ),
+                          )
+                        : ListView.separated(
+                            itemCount: displayed.length,
+                            separatorBuilder: (_, _) =>
+                                const Divider(height: 1),
+                            itemBuilder: (_, index) {
+                              final title = displayed[index];
+                              final due = DateTime.parse('${title['due']}');
+                              final delay = today.difference(due).inDays;
+                              final isOverdue =
+                                  detailView == 'open' && delay > 0;
+                              final receivedDate = latestReceipt(title);
+                              return ListTile(
+                                contentPadding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                  vertical: 5,
+                                ),
+                                leading: Container(
+                                  width: 40,
+                                  height: 40,
+                                  decoration: BoxDecoration(
+                                    color:
+                                        (isOverdue
+                                                ? const Color(0xFFB54235)
+                                                : const Color(0xFF2E8B67))
+                                            .withValues(alpha: .10),
+                                    shape: BoxShape.circle,
+                                  ),
+                                  child: Icon(
+                                    isOverdue
+                                        ? Icons.priority_high_rounded
+                                        : detailView == 'open'
+                                        ? Icons.event_outlined
+                                        : Icons.check_rounded,
+                                    color: isOverdue
+                                        ? const Color(0xFFB54235)
+                                        : const Color(0xFF2E8B67),
+                                  ),
+                                ),
+                                title: Text(
+                                  '${title['description']}',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                                subtitle: Text(
+                                  detailView == 'open'
+                                      ? 'VENCIMENTO ${dateLabel('${title['due']}')}${isOverdue ? '  •  $delay DIA(S) EM ATRASO' : ''}'
+                                      : 'RECEBIDO${receivedDate.isEmpty ? '' : ' EM ${dateLabel(receivedDate)}'}',
+                                  style: TextStyle(
+                                    color: isOverdue
+                                        ? const Color(0xFFB54235)
+                                        : mutedText,
+                                    fontSize: 11,
+                                  ),
+                                ),
+                                trailing: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text(
+                                      money(
+                                        detailView == 'open'
+                                            ? title['remaining'] as num
+                                            : title['amount'] as num,
+                                      ),
+                                      style: const TextStyle(
+                                        fontWeight: FontWeight.w800,
+                                      ),
+                                    ),
+                                    if (detailView == 'open') ...[
+                                      const SizedBox(width: 10),
+                                      FilledButton(
+                                        onPressed: () =>
+                                            Navigator.pop(dialogContext, title),
+                                        child: const Text('Receber'),
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              );
+                            },
+                          ),
+                  ),
+                ],
+              ),
+            );
+          }
+
+          return Dialog(
+            insetPadding: const EdgeInsets.all(24),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(
+                maxWidth: 1180,
+                maxHeight: 760,
+                minHeight: 560,
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(22),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      children: [
+                        Container(
+                          width: 46,
+                          height: 46,
+                          decoration: BoxDecoration(
+                            color: teal.withValues(alpha: .12),
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          child: const Icon(
+                            Icons.monitor_heart_outlined,
+                            color: teal,
+                          ),
+                        ),
+                        const SizedBox(width: 14),
+                        const Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Monitoramento de contas a receber',
+                                style: TextStyle(
+                                  fontSize: 23,
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                              SizedBox(height: 3),
+                              Text(
+                                'Veja quem está em atraso e confira as parcelas de cada cliente.',
+                              ),
+                            ],
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: 'Fechar',
+                          onPressed: () => Navigator.pop(dialogContext),
+                          icon: const Icon(Icons.close),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+                    Wrap(
+                      spacing: 16,
+                      runSpacing: 8,
+                      children: const [
+                        _MonitorLegend(
+                          color: Color(0xFF2E8B67),
+                          label: 'EM DIA',
+                        ),
+                        _MonitorLegend(
+                          color: Color(0xFFD28A20),
+                          label: 'ATÉ 30 DIAS DE ATRASO',
+                        ),
+                        _MonitorLegend(
+                          color: Color(0xFFB54235),
+                          label: 'MAIS DE 30 DIAS DE ATRASO',
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+                    Expanded(
+                      child: LayoutBuilder(
+                        builder: (context, constraints) {
+                          if (constraints.maxWidth < 900) {
+                            return Column(
+                              children: [
+                                compactClientPicker(),
+                                const SizedBox(height: 12),
+                                clientDetails(),
+                              ],
+                            );
+                          }
+                          return Row(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              clientList(),
+                              const SizedBox(width: 16),
+                              clientDetails(),
+                            ],
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+    if (selectedTitle != null && mounted) settleForm(selectedTitle);
+  }
+
   List<Widget> dashboard() {
     final now = DateTime.now();
     final today = iso(now);
@@ -3742,6 +4621,325 @@ class _WorkspaceState extends State<Workspace> {
     return result;
   }
 
+  Future<void> importOfxPayables() async {
+    final availableAccounts = accounts.toList();
+    if (availableAccounts.isEmpty) {
+      message('Cadastre primeiro a conta financeira ITAU como conta bancária.');
+      return;
+    }
+    final file = await openFile(
+      acceptedTypeGroups: const [
+        XTypeGroup(label: 'Extrato bancário OFX', extensions: ['ofx']),
+      ],
+    );
+    if (file == null || !mounted) return;
+    var accountId =
+        (availableAccounts.firstWhere(
+                  (account) =>
+                      '${account['name']}'.toUpperCase().startsWith('ITA'),
+                  orElse: () => availableAccounts.first,
+                )['id']
+                as num)
+            .toInt();
+    if (availableAccounts.length > 1) {
+      final selectedAccount = await showDialog<int>(
+        context: context,
+        builder: (c) => StatefulBuilder(
+          builder: (c, setLocal) => AlertDialog(
+            title: const Text('Conta bancária do extrato'),
+            content: SizedBox(
+              width: 430,
+              child: DropdownButtonFormField<int>(
+                initialValue: accountId,
+                decoration: const InputDecoration(
+                  labelText: 'Conta financeira',
+                  helperText: 'As baixas serão movimentadas nesta conta.',
+                ),
+                items: availableAccounts
+                    .map(
+                      (account) => DropdownMenuItem<int>(
+                        value: (account['id'] as num).toInt(),
+                        child: Text('${account['name']}'),
+                      ),
+                    )
+                    .toList(),
+                onChanged: (value) {
+                  if (value != null) setLocal(() => accountId = value);
+                },
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(c),
+                child: const Text('Cancelar'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(c, accountId),
+                child: const Text('Ler extrato'),
+              ),
+            ],
+          ),
+        ),
+      );
+      if (selectedAccount == null) return;
+      accountId = selectedAccount;
+    }
+    if (!mounted) return;
+    var progressOpen = true;
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const AlertDialog(
+        content: Row(
+          children: [
+            SizedBox(
+              width: 28,
+              height: 28,
+              child: CircularProgressIndicator(strokeWidth: 3),
+            ),
+            SizedBox(width: 18),
+            Expanded(
+              child: Text('Lendo o extrato e procurando contas a pagar.'),
+            ),
+          ],
+        ),
+      ),
+    );
+    try {
+      final bytes = await file.readAsBytes();
+      final preview = RecordData.from(
+        await api.request('$base/ofx/preview', {
+          'accountId': accountId,
+          'fileName': file.name,
+          'dataBase64': base64Encode(bytes),
+        }),
+      );
+      if (progressOpen && mounted) {
+        Navigator.of(context, rootNavigator: true).pop();
+        progressOpen = false;
+      }
+      if (!mounted) return;
+      final transactions = rows(preview['transactions']);
+      final openPayables =
+          titles
+              .where(
+                (title) =>
+                    title['kind'] == 'payable' &&
+                    title['cancelled'] == 0 &&
+                    (title['remaining'] as num) > 0,
+              )
+              .toList()
+            ..sort((a, b) => '${a['due']}'.compareTo('${b['due']}'));
+      final selected = <int>{};
+      final matches = <int, int?>{};
+      for (final transaction in transactions) {
+        final transactionId = (transaction['id'] as num).toInt();
+        final suggestion = transaction['suggestedTitleId'];
+        if (suggestion is num && transaction['duplicate'] != true) {
+          matches[transactionId] = suggestion.toInt();
+          selected.add(transactionId);
+        }
+      }
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (c) => StatefulBuilder(
+          builder: (c, setLocal) {
+            final selectedTotal = transactions
+                .where((item) => selected.contains((item['id'] as num).toInt()))
+                .fold<num>(0, (sum, item) => sum + (item['amount'] as num));
+            return AlertDialog(
+              title: const Text('Conferir pagamentos do OFX'),
+              content: SizedBox(
+                width: 1050,
+                height: 610,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: teal.withValues(alpha: .07),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Wrap(
+                        spacing: 22,
+                        runSpacing: 8,
+                        children: [
+                          Text('Conta: ${preview['accountName']}'),
+                          Text('${preview['total']} débitos encontrados'),
+                          Text('${preview['suggested']} sugestões'),
+                          Text('${preview['duplicates']} já importados'),
+                          Text(
+                            'Selecionado: ${money(selectedTotal)}',
+                            style: const TextStyle(fontWeight: FontWeight.w700),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    const Text(
+                      'Confira cada linha. Somente as movimentações marcadas serão baixadas.',
+                    ),
+                    const SizedBox(height: 10),
+                    Expanded(
+                      child: ListView.separated(
+                        itemCount: transactions.length,
+                        separatorBuilder: (_, _) => const Divider(height: 1),
+                        itemBuilder: (_, index) {
+                          final item = transactions[index];
+                          final id = (item['id'] as num).toInt();
+                          final duplicate = item['duplicate'] == true;
+                          final matchedTitleId = matches[id];
+                          final matched = matchedTitleId == null
+                              ? null
+                              : openPayables
+                                    .where(
+                                      (title) =>
+                                          (title['id'] as num).toInt() ==
+                                          matchedTitleId,
+                                    )
+                                    .firstOrNull;
+                          final difference = matched == null
+                              ? 0
+                              : (item['amount'] as num) -
+                                    (matched['remaining'] as num);
+                          return Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 8),
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Checkbox(
+                                  value: selected.contains(id),
+                                  onChanged: duplicate || matchedTitleId == null
+                                      ? null
+                                      : (checked) => setLocal(() {
+                                          if (checked == true) {
+                                            selected.add(id);
+                                          } else {
+                                            selected.remove(id);
+                                          }
+                                        }),
+                                ),
+                                SizedBox(
+                                  width: 330,
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        '${dateLabel('${item['date']}')} • ${money(item['amount'])}',
+                                        style: const TextStyle(
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        '${item['memo']}',
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          color: mutedText,
+                                        ),
+                                      ),
+                                      if (duplicate)
+                                        const Text(
+                                          'JÁ IMPORTADO',
+                                          style: TextStyle(
+                                            color: Color(0xFFB23A3A),
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(width: 14),
+                                Expanded(
+                                  child: DropdownButtonFormField<int>(
+                                    key: ValueKey('ofx-$id-$matchedTitleId'),
+                                    initialValue: matchedTitleId,
+                                    isExpanded: true,
+                                    decoration: InputDecoration(
+                                      labelText: duplicate
+                                          ? 'Movimentação já utilizada'
+                                          : 'Conta a pagar correspondente',
+                                      helperText: matched == null
+                                          ? 'Selecione o lançamento correto'
+                                          : difference > 0
+                                          ? 'Diferença de ${money(difference)} será registrada como acréscimo'
+                                          : difference < 0
+                                          ? 'Será feita uma baixa parcial'
+                                          : 'Valor conferido',
+                                    ),
+                                    items: openPayables
+                                        .map(
+                                          (title) => DropdownMenuItem<int>(
+                                            value: (title['id'] as num).toInt(),
+                                            child: Text(
+                                              '${title['description']} • ${title['partyName'] ?? 'SEM FORNECEDOR'} • ${dateLabel('${title['due']}')} • ${money(title['remaining'])}',
+                                              overflow: TextOverflow.ellipsis,
+                                            ),
+                                          ),
+                                        )
+                                        .toList(),
+                                    onChanged: duplicate
+                                        ? null
+                                        : (value) => setLocal(() {
+                                            matches[id] = value;
+                                            if (value == null) {
+                                              selected.remove(id);
+                                            } else {
+                                              selected.add(id);
+                                            }
+                                          }),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(c, false),
+                  child: const Text('Cancelar'),
+                ),
+                FilledButton.icon(
+                  onPressed: selected.isEmpty
+                      ? null
+                      : () => Navigator.pop(c, true),
+                  icon: const Icon(Icons.check_circle_outline),
+                  label: Text('Confirmar ${selected.length} baixa(s)'),
+                ),
+              ],
+            );
+          },
+        ),
+      );
+      if (confirmed != true) return;
+      final result = await api.request('$base/ofx/confirm', {
+        'importId': preview['importId'],
+        'items': selected
+            .map((id) => {'transactionId': id, 'titleId': matches[id]})
+            .toList(),
+      });
+      await load();
+      message(
+        '${result['count']} pagamento(s) baixado(s) pelo extrato. Total: ${money(result['total'])}.',
+      );
+    } catch (e) {
+      if (progressOpen && mounted) {
+        Navigator.of(context, rootNavigator: true).pop();
+      }
+      message(e.toString().replaceFirst('Exception: ', ''));
+    }
+  }
+
   void settleForm(RecordData t) {
     final path = '$base/titles/${t['id']}/settle';
     int suggested(String key) =>
@@ -5005,4 +6203,31 @@ class _WorkspaceState extends State<Workspace> {
           : 'O lançamento sairá das listas e a exclusão ficará registrada no histórico. Se houve baixa, ela precisa estar estornada antes da exclusão.',
     );
   }
+}
+
+class _MonitorLegend extends StatelessWidget {
+  final Color color;
+  final String label;
+  const _MonitorLegend({required this.color, required this.label});
+
+  @override
+  Widget build(BuildContext context) => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Container(
+        width: 10,
+        height: 10,
+        decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+      ),
+      const SizedBox(width: 6),
+      Text(
+        label,
+        style: TextStyle(
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
+          fontSize: 11,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    ],
+  );
 }

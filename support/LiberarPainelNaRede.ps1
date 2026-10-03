@@ -16,6 +16,7 @@ New-NetFirewallRule `
     -Action Allow `
     -Protocol TCP `
     -LocalPort 5200 `
-    -Profile Private,Public | Out-Null
+    -Profile Private,Public `
+    -RemoteAddress LocalSubnet | Out-Null
 
 Write-Output 'PAINEL CENTRAL LIBERADO NA REDE LOCAL PELA PORTA 5200.'

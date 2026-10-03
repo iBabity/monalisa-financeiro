@@ -29,6 +29,9 @@ app.Use(async (ctx, next) => {
     try { await next(); }
     catch (ArgumentException ex) { ctx.Response.StatusCode = 400; await ctx.Response.WriteAsJsonAsync(new { error = ex.Message }); }
     catch (SqliteException ex) when (ex.SqliteErrorCode == 19) { ctx.Response.StatusCode = 409; await ctx.Response.WriteAsJsonAsync(new { error = "Registro duplicado ou referência inválida." }); }
+    catch (HttpRequestException) { ctx.Response.StatusCode = 503; await ctx.Response.WriteAsJsonAsync(new { error = "Não foi possível acessar o Painel Central. Verifique se este computador está na mesma rede e se o endereço do painel está correto." }); }
+    catch (TaskCanceledException) { ctx.Response.StatusCode = 504; await ctx.Response.WriteAsJsonAsync(new { error = "O Painel Central demorou para responder. Verifique a conexão de rede e tente novamente." }); }
+    catch (Exception ex) { app.Logger.LogError(ex,"Erro não tratado em {Method} {Path}",ctx.Request.Method,ctx.Request.Path);ctx.Response.StatusCode = 500; await ctx.Response.WriteAsJsonAsync(new { error = "O serviço local encontrou um erro ao concluir a operação. Feche e abra o Monalisa Financeiro e tente novamente." }); }
 });
 app.Use(async(ctx,next)=>{
     if(!serverMode||ctx.Connection.LocalPort!=sharedPort||!ctx.Request.Path.StartsWithSegments("/api")){await next();return;}
@@ -157,6 +160,8 @@ app.MapPost("/api/companies/{companyId:int}/titles/{id:int}/duplicate", (int com
 app.MapPost("/api/companies/{companyId:int}/titles/{id:int}/settle", (int companyId, int id, SettlementInput x, Ledger db) => db.Settle(companyId,id,x));
 app.MapPost("/api/companies/{companyId:int}/settlements/bulk", (int companyId,BulkSettlementInput x,Ledger db) => db.BulkSettle(companyId,x));
 app.MapPost("/api/companies/{companyId:int}/settlements/{id:int}/reverse", (int companyId, int id, ReasonInput x, Ledger db) => db.Reverse(companyId,id,x));
+app.MapPost("/api/companies/{companyId:int}/ofx/preview", (int companyId,OfxPreviewInput x,Ledger db) => db.PreviewOfx(companyId,x));
+app.MapPost("/api/companies/{companyId:int}/ofx/confirm", (int companyId,OfxConfirmInput x,Ledger db) => db.ConfirmOfx(companyId,x));
 app.MapPost("/api/companies/{companyId:int}/titles/{id:int}/cancel", (int companyId,int id,CancelInput x,Ledger db) => db.Cancel(companyId,id,x));
 app.MapPost("/api/companies/{companyId:int}/titles/{id:int}/edit", (int companyId,int id,EditTitleInput x,HttpContext context,Ledger db) => db.Edit(companyId,id,x,context.Items["user"] as AuthIdentity));
 app.MapPost("/api/companies/{companyId:int}/titles/{id:int}/delete", (int companyId,int id,DeleteInput x,Ledger db) => db.Delete(companyId,id,x));
@@ -243,6 +248,11 @@ record TitleInput(string Kind,string Description,long Amount,string Due,int? Par
 record SettlementInput(int AccountId,long Principal,long Interest,long Penalty,long Discount,string Date,long Additional=0,int? PaymentMethodId=null);
 record BulkSettlementItem(int TitleId,long Principal,long Interest=0,long Penalty=0,long Discount=0,long Additional=0);
 record BulkSettlementInput(int AccountId,string Date,BulkSettlementItem[] Items,int? PaymentMethodId=null);
+record OfxPreviewInput(int AccountId,string FileName,string DataBase64);
+record OfxConfirmItem(long TransactionId,int TitleId);
+record OfxConfirmInput(long ImportId,OfxConfirmItem[] Items);
+record ParsedOfxTransaction(string FitId,string Date,long Amount,string Memo,string Type);
+record ParsedOfx(string BankId,string Start,string End,List<ParsedOfxTransaction> Transactions);
 record ReasonInput(string Reason);
 record CancelInput(string Reason, string Scope = "single");
 record EditTitleInput(string Description,long Amount,string Due,int? PartyId,string Category,string Notes,string Scope = "single",string DocumentNumber = "",string IssueDate = "",string Branch = "",string CostCenter = "",int? PaymentMethodId=null);
@@ -403,6 +413,27 @@ sealed class Ledger {
         }
         if (!Query(c,"PRAGMA table_info(settlements)").Any(r => (string)r["name"]! == "paymentMethodId"))
             Run(c,"ALTER TABLE settlements ADD COLUMN paymentMethodId INTEGER REFERENCES payment_methods(id)");
+        currentVersion=Convert.ToInt32(Query(c,"PRAGMA user_version")[0]["user_version"]);
+        if(currentVersion<13) {
+            if(Query(c,"SELECT id FROM companies LIMIT 1").Count>0)Backup();
+            Run(c,"""
+                CREATE TABLE IF NOT EXISTS ofx_imports(
+                    id INTEGER PRIMARY KEY,companyId INTEGER NOT NULL REFERENCES companies(id),
+                    accountId INTEGER NOT NULL REFERENCES accounts(id),fileName TEXT NOT NULL,
+                    fingerprint TEXT NOT NULL,bankId TEXT NOT NULL DEFAULT '',periodStart TEXT NOT NULL DEFAULT '',
+                    periodEnd TEXT NOT NULL DEFAULT '',created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(companyId,accountId,fingerprint));
+                CREATE TABLE IF NOT EXISTS ofx_transactions(
+                    id INTEGER PRIMARY KEY,importId INTEGER NOT NULL REFERENCES ofx_imports(id),
+                    companyId INTEGER NOT NULL REFERENCES companies(id),accountId INTEGER NOT NULL REFERENCES accounts(id),
+                    fitId TEXT NOT NULL,date TEXT NOT NULL,amount INTEGER NOT NULL,memo TEXT NOT NULL,
+                    transactionType TEXT NOT NULL DEFAULT '',settlementId INTEGER REFERENCES settlements(id),
+                    UNIQUE(companyId,accountId,fitId));
+                CREATE INDEX IF NOT EXISTS ix_ofx_transactions_import ON ofx_transactions(importId,id);
+                CREATE INDEX IF NOT EXISTS ix_ofx_transactions_settlement ON ofx_transactions(settlementId);
+                PRAGMA user_version=13;
+                """);
+        }
         foreach(var company in Query(c,"SELECT id FROM companies")) SeedAuxiliaries(c,Convert.ToInt32(company["id"]));
     }
     SqliteConnection Open() { var c = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource=path, ForeignKeys=true }.ToString()); c.Open(); return c; }
@@ -728,6 +759,59 @@ sealed class Ledger {
         foreach(var item in x.Items){var input=new SettlementInput(x.AccountId,item.Principal,item.Interest,item.Penalty,item.Discount,x.Date,item.Additional,x.PaymentMethodId);ids.Add(SettleCore(c,company,item.TitleId,input));total=checked(total+item.Principal+item.Interest+item.Penalty+item.Additional-item.Discount);}
         Audit(c,company,"Baixa em lote",new{count=ids.Count,total,settlementIds=ids});return new{ok=true,count=ids.Count,total,settlementIds=ids};
     });
+    static string OfxTag(string text,string tag) {
+        var match=Regex.Match(text,$@"<{Regex.Escape(tag)}>\s*([^<\r\n]+)",RegexOptions.IgnoreCase);
+        return match.Success?match.Groups[1].Value.Trim():"";
+    }
+    static string OfxDate(string value,bool required) {
+        var digits=new string((value??"").TakeWhile(char.IsDigit).ToArray());
+        if(digits.Length>=8&&DateOnly.TryParseExact(digits[..8],"yyyyMMdd",CultureInfo.InvariantCulture,DateTimeStyles.None,out var date))return date.ToString("yyyy-MM-dd");
+        if(required)throw new ArgumentException("O OFX contém uma movimentação com data inválida.");return "";
+    }
+    static ParsedOfx ParseOfx(byte[] content) {
+        if(content.Length==0||content.Length>10*1024*1024)throw new ArgumentException("O arquivo OFX deve ter até 10 MB.");
+        var header=Encoding.ASCII.GetString(content,0,Math.Min(content.Length,500));
+        var text=header.Contains("UTF-8",StringComparison.OrdinalIgnoreCase)?Encoding.UTF8.GetString(content):Encoding.Latin1.GetString(content);
+        if(!text.Contains("<OFX",StringComparison.OrdinalIgnoreCase))throw new ArgumentException("O arquivo selecionado não é um OFX válido.");
+        var bankId=OfxTag(text,"BANKID");var start=OfxDate(OfxTag(text,"DTSTART"),false);var end=OfxDate(OfxTag(text,"DTEND"),false);
+        var transactions=new List<ParsedOfxTransaction>();var index=0;
+        foreach(Match block in Regex.Matches(text,@"(?is)<STMTTRN>(.*?)(?:</STMTTRN>|(?=<STMTTRN>)|(?=</BANKTRANLIST>))")) {
+            index++;var value=block.Groups[1].Value;var rawAmount=OfxTag(value,"TRNAMT");
+            if(!decimal.TryParse(rawAmount,NumberStyles.Number|NumberStyles.AllowLeadingSign,CultureInfo.InvariantCulture,out var amount))continue;
+            var cents=checked((long)Math.Round(amount*100m,0,MidpointRounding.AwayFromZero));if(cents==0)continue;
+            var date=OfxDate(OfxTag(value,"DTPOSTED"),true);var memo=(OfxTag(value,"MEMO")+" "+OfxTag(value,"NAME")).Trim().ToUpperInvariant();if(memo.Length==0)memo="MOVIMENTO BANCÁRIO";
+            var fitId=OfxTag(value,"FITID").Trim().ToUpperInvariant();if(fitId.Length==0)fitId=Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes($"{date}|{cents}|{memo}|{index}")));
+            transactions.Add(new(fitId.Length>200?fitId[..200]:fitId,date,cents,memo.Length>500?memo[..500]:memo,OfxTag(value,"TRNTYPE").ToUpperInvariant()));
+        }
+        if(transactions.Count==0)throw new ArgumentException("Nenhuma movimentação foi encontrada no OFX.");
+        return new(bankId,start,end,transactions);
+    }
+    static HashSet<string> MatchWords(string value) {
+        var normalized=value.Normalize(NormalizationForm.FormD);
+        var clean=new string(normalized.Where(ch=>CharUnicodeInfo.GetUnicodeCategory(ch)!=UnicodeCategory.NonSpacingMark).Select(ch=>char.IsLetterOrDigit(ch)?char.ToUpperInvariant(ch):' ').ToArray());
+        return clean.Split(' ',StringSplitOptions.RemoveEmptyEntries).Where(word=>word.Length>=3&&!new[]{"PAGAMENTO","TRANSFERENCIA","DEBITO","PIX","BANCO","ITAU","TED","DOC"}.Contains(word)).ToHashSet();
+    }
+    public object PreviewOfx(int company,OfxPreviewInput x)=>Write(c=> {
+        Company(c,company);Existing(c,"accounts",x.AccountId,company);var account=Query(c,"SELECT * FROM accounts WHERE id=@p0",x.AccountId)[0];
+        byte[] content;try{content=Convert.FromBase64String(x.DataBase64??"");}catch{throw new ArgumentException("Não foi possível ler o arquivo OFX.");}
+        var parsed=ParseOfx(content);var debits=parsed.Transactions.Where(t=>t.Amount<0).ToList();if(debits.Count==0)throw new ArgumentException("Este OFX não possui débitos para conciliar com contas a pagar.");
+        var fingerprint=Convert.ToHexString(SHA256.HashData(content));var existingImport=Query(c,"SELECT id FROM ofx_imports WHERE companyId=@p0 AND accountId=@p1 AND fingerprint=@p2",company,x.AccountId,fingerprint).SingleOrDefault();
+        long importId;if(existingImport is null){Run(c,"INSERT INTO ofx_imports(companyId,accountId,fileName,fingerprint,bankId,periodStart,periodEnd) VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6)",company,x.AccountId,Required(x.FileName,"Nome do arquivo"),fingerprint,parsed.BankId,parsed.Start,parsed.End);importId=Number(Query(c,"SELECT last_insert_rowid() id")[0],"id");}else importId=Number(existingImport,"id");
+        foreach(var item in debits)if(Query(c,"SELECT id FROM ofx_transactions WHERE companyId=@p0 AND accountId=@p1 AND fitId=@p2",company,x.AccountId,item.FitId).Count==0)Run(c,"INSERT INTO ofx_transactions(importId,companyId,accountId,fitId,date,amount,memo,transactionType) VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7)",importId,company,x.AccountId,item.FitId,item.Date,item.Amount,item.Memo,item.Type);
+        var openTitles=Query(c,"""SELECT t.id,t.description,t.due,COALESCE(p.name,'SEM FORNECEDOR') partyName,t.amount-COALESCE((SELECT SUM(s.principal) FROM settlements s WHERE s.titleId=t.id AND s.reversed=0),0) remaining FROM titles t LEFT JOIN parties p ON p.id=t.partyId WHERE t.companyId=@p0 AND t.kind='payable' AND t.deleted=0 AND t.cancelled=0 AND t.amount>COALESCE((SELECT SUM(s.principal) FROM settlements s WHERE s.titleId=t.id AND s.reversed=0),0) ORDER BY t.due,t.id""",company);
+        var rows=new List<object>();var duplicates=0;var suggested=0;
+        foreach(var parsedItem in debits){var stored=Query(c,"SELECT * FROM ofx_transactions WHERE companyId=@p0 AND accountId=@p1 AND fitId=@p2",company,x.AccountId,parsedItem.FitId)[0];var otherImport=Number(stored,"importId")!=importId;var reconciled=stored["settlementId"] is not null;var duplicate=otherImport||reconciled;if(duplicate)duplicates++;var cash=-parsedItem.Amount;var words=MatchWords(parsedItem.Memo);
+            var ranked=openTitles.Select(title=>{var remaining=Number(title,"remaining");var days=Math.Abs(Date((string)title["due"]!).DayNumber-Date(parsedItem.Date).DayNumber);var common=words.Intersect(MatchWords($"{title["description"]} {title["partyName"]}")).Count();var exact=remaining==cash;var score=(exact?100:Math.Abs(remaining-cash)<=Math.Max(100,cash/100)?35:0)+(days<=3?25:days<=7?15:days<=30?5:0)+Math.Min(30,common*10);return new{title,score,exact,days};}).OrderByDescending(v=>v.score).ThenBy(v=>v.days).ToList();
+            var best=ranked.FirstOrDefault();var recommend=!duplicate&&best is not null&&best.exact;if(recommend)suggested++;
+            rows.Add(new{id=Number(stored,"id"),date=parsedItem.Date,amount=cash,memo=parsedItem.Memo,duplicate,reconciled,suggestedTitleId=recommend?(long?)Number(best!.title,"id"):null,suggestedDescription=recommend?(string)best!.title["description"]!:"",suggestedParty=recommend?(string)best!.title["partyName"]!:"",suggestedDue=recommend?(string)best!.title["due"]!:"",suggestedRemaining=recommend?Number(best!.title,"remaining"):0});}
+        Audit(c,company,"Importação OFX",new{importId,file=x.FileName,accountId=x.AccountId,debits=debits.Count,duplicates,suggested});return new{importId,fileName=x.FileName,accountId=x.AccountId,accountName=account["name"],bankId=parsed.BankId,periodStart=parsed.Start,periodEnd=parsed.End,total=debits.Count,duplicates,suggested,transactions=rows};
+    });
+    public object ConfirmOfx(int company,OfxConfirmInput x)=>Write(c=> {
+        Company(c,company);if(x.Items is null||x.Items.Length==0||x.Items.Length>500)throw new ArgumentException("Selecione ao menos uma movimentação para baixar.");if(x.Items.Select(i=>i.TransactionId).Distinct().Count()!=x.Items.Length)throw new ArgumentException("Há movimentações repetidas na seleção.");
+        var import=Query(c,"SELECT * FROM ofx_imports WHERE id=@p0 AND companyId=@p1",x.ImportId,company).SingleOrDefault()??throw new ArgumentException("Importação OFX não encontrada.");var accountId=Convert.ToInt32(Number(import,"accountId"));var settlementIds=new List<long>();long total=0;
+        foreach(var item in x.Items){var transaction=Query(c,"SELECT * FROM ofx_transactions WHERE id=@p0 AND importId=@p1 AND companyId=@p2",item.TransactionId,x.ImportId,company).SingleOrDefault()??throw new ArgumentException("Movimentação OFX não pertence a esta importação.");if(transaction["settlementId"] is not null)throw new ArgumentException("Uma das movimentações selecionadas já foi conciliada.");var cash=-Number(transaction,"amount");if(cash<=0)throw new ArgumentException("Somente débitos podem baixar contas a pagar nesta versão.");var title=Query(c,TitlesSql,company).SingleOrDefault(t=>Number(t,"id")==item.TitleId)??throw new ArgumentException("Conta a pagar não encontrada.");if((title["kind"] as string)!="payable"||Number(title,"cancelled")!=0||Number(title,"remaining")<=0)throw new ArgumentException("Selecione uma conta a pagar que esteja em aberto.");var principal=Math.Min(cash,Number(title,"remaining"));var additional=Math.Max(0,cash-principal);var settlementId=SettleCore(c,company,item.TitleId,new(accountId,principal,0,0,0,(string)transaction["date"]!,additional));Run(c,"UPDATE ofx_transactions SET settlementId=@p0 WHERE id=@p1",settlementId,item.TransactionId);settlementIds.Add(settlementId);total=checked(total+cash);}
+        Audit(c,company,"Conciliação OFX",new{importId=x.ImportId,count=x.Items.Length,total,settlementIds});return new{ok=true,count=x.Items.Length,total,settlementIds};
+    });
     public object Duplicate(int company,int id,DuplicateInput x)=>Write(c=>{
         Existing(c,"titles",id,company);var t=Query(c,"SELECT * FROM titles WHERE id=@p0 AND deleted=0",id).SingleOrDefault()??throw new ArgumentException("Lançamento não encontrado.");var due=string.IsNullOrWhiteSpace(x.Due)?(string)t["due"]!:Date(x.Due).ToString("yyyy-MM-dd");var description=Regex.Replace((string)t["description"]!,@" \(\d+/\d+\)$","")+" - CÓPIA";
         Run(c,"INSERT INTO titles(companyId,kind,description,amount,due,partyId,category,notes,installmentNumber,installmentCount,interestRate,penaltyRate,discountRate,issueDate,branch,costCenter,paymentMethodId) VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7,1,1,@p8,@p9,@p10,@p11,@p12,@p13,@p14)",company,t["kind"],description,t["amount"],due,t["partyId"],t["category"],t["notes"],t["interestRate"],t["penaltyRate"],t["discountRate"],t["issueDate"],t["branch"],t["costCenter"],t["paymentMethodId"]);var newId=Number(Query(c,"SELECT last_insert_rowid() AS id")[0],"id");Audit(c,company,"Duplicação",new{sourceId=id,titleId=newId,due});return new{ok=true,id=newId};
@@ -736,6 +820,7 @@ sealed class Ledger {
         Existing(c,"settlements",id,company);var reason=Required(x.Reason,"Motivo");var s=Query(c,"SELECT * FROM settlements WHERE id=@p0",id)[0];
         if(Number(s,"reversed")!=0)throw new ArgumentException("Esta baixa já foi estornada.");
         Run(c,"UPDATE settlements SET reversed=1,reason=@p0 WHERE id=@p1",reason,id);
+        Run(c,"UPDATE ofx_transactions SET settlementId=NULL WHERE settlementId=@p0",id);
         Run(c,"INSERT INTO movements(companyId,accountId,amount,date,description,settlementId) SELECT companyId,accountId,-amount,@p0,'Estorno: '||description,settlementId FROM movements WHERE settlementId=@p1",DateTime.Today.ToString("yyyy-MM-dd"),id);
         Audit(c,company,"Estorno",new {settlementId=id,reason});return new {ok=true};
     });

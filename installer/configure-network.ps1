@@ -69,7 +69,7 @@ function Save-NetworkConfiguration([string]$SelectedMode, [string]$Address, [str
         Set-Content -LiteralPath (Join-Path $ConfigurationRoot 'network-server.txt') -Value $Address -Encoding ascii
         Set-Content -LiteralPath (Join-Path $ConfigurationRoot 'network-key.txt') -Value $Key -Encoding ascii
         Get-NetFirewallRule -DisplayName 'Monalisa Financeiro - Dados compartilhados' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
-        New-NetFirewallRule -DisplayName 'Monalisa Financeiro - Dados compartilhados' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 5188 -Profile Private -ErrorAction Stop | Out-Null
+        New-NetFirewallRule -DisplayName 'Monalisa Financeiro - Dados compartilhados' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 5188 -Profile Private,Public -RemoteAddress LocalSubnet -ErrorAction Stop | Out-Null
         return "MÁQUINA PRINCIPAL CONFIGURADA.`n`nENDEREÇO: $Address`nCHAVE DE CONEXÃO: $Key`n`nANOTE O ENDEREÇO E A CHAVE PARA CONFIGURAR A SEGUNDA MÁQUINA."
     }
 
