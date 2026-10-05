@@ -16,7 +16,7 @@ Na raiz do projeto, execute:
 O arquivo será criado em:
 
 ```text
-artifacts\showcase\Monalisa-Financeiro-Demonstracao-Setup-1.1.16.exe
+artifacts\showcase\Monalisa-Financeiro-Demonstracao-Setup-1.1.17.exe
 ```
 
 ## Separação da edição comercial

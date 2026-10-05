@@ -37,6 +37,11 @@ bool ShowcaseEdition(const std::filesystem::path& directory) {
   return std::filesystem::exists(directory / L"showcase-edition.txt");
 }
 
+bool NoLoginEdition(const std::filesystem::path& directory) {
+  return ShowcaseEdition(directory) ||
+         std::filesystem::exists(directory / L"no-login.txt");
+}
+
 std::filesystem::path ProgramDataDirectory() {
   std::vector<wchar_t> buffer(32768);
   const DWORD length = GetEnvironmentVariableW(
@@ -752,6 +757,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
 
   const bool showcase = ShowcaseEdition(ExecutableDirectory());
   if (showcase) SetEnvironmentVariableW(L"MONALISA_SHOWCASE", L"1");
+  if (NoLoginEdition(ExecutableDirectory()))
+    SetEnvironmentVariableW(L"MONALISA_NO_LOGIN", L"1");
   SetEnvironmentVariableW(L"MONALISA_APP_VERSION", Wide(FLUTTER_VERSION).c_str());
   const auto configuration_directory = ProgramDataDirectory();
   const auto license_server = EnvironmentValue(L"MONALISA_LICENSE_URL").empty()

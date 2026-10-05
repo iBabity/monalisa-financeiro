@@ -34,6 +34,7 @@ class _AccessGateState extends State<AccessGate> {
   bool loading = true;
   bool busy = false;
   bool needsSetup = false;
+  bool noLogin = false;
   bool changingLicense = false;
   bool hidePin = true;
   bool darkMode = false;
@@ -80,6 +81,11 @@ class _AccessGateState extends State<AccessGate> {
         return;
       }
       final result = await api.request('/auth/bootstrap');
+      if (result['noLogin'] == true) {
+        noLogin = true;
+        await enterLocalAccess();
+        return;
+      }
       if (mounted) {
         setState(() {
           needsSetup = result['needsSetup'] == true;
@@ -94,6 +100,25 @@ class _AccessGateState extends State<AccessGate> {
         });
       }
     }
+  }
+
+  Future<void> enterLocalAccess() async {
+    final result = await api.request('/auth/local', {});
+    api.token = result['token'];
+    final authenticated = RecordData.from(result['user']);
+    final available = (authenticated['companies'] as List)
+        .map((item) => RecordData.from(item))
+        .toList();
+    if (!mounted) return;
+    setState(() {
+      user = authenticated;
+      companies = available;
+      selectedCompany = available.length == 1 ? available.first['id'] : null;
+      needsSetup = false;
+      loading = false;
+      busy = false;
+      error = null;
+    });
   }
 
   Future<void> activateLicense() async {
@@ -264,6 +289,10 @@ class _AccessGateState extends State<AccessGate> {
       username.clear();
       pin.clear();
     });
+    if (noLogin) {
+      setState(() => loading = true);
+      await checkSetup();
+    }
   }
 
   @override

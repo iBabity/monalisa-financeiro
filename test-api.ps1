@@ -81,6 +81,24 @@ try {
     Check (@((Request '/companies/1/state').parties | Where-Object id -eq 1).Count -eq 0) 'Cadastro pode ser excluído após excluir seus lançamentos'
     Rejected '/companies/1/titles/2/delete' @{reason='Ainda possui baixa ativa';scope='single'}
     Rejected '/companies/1/titles/2/edit' @{description='Não pode';amount=100;due=$today;category='';notes='';scope='single'}
+    Request '/companies/1/plans' @{name='AJUSTE TESTE';kind='payable';interestMode='value';interestValue=275;interestRate=0;penaltyMode='percentage';penaltyRate=0;penaltyValue=0;discountMode='percentage';discountRate=0;discountValue=0} | Out-Null
+    Request '/companies/1/plans' @{name='AJUSTE TESTE';kind='receivable';interestMode='percentage';interestRate=0;interestValue=0;penaltyMode='percentage';penaltyRate=0;penaltyValue=0;discountMode='percentage';discountRate=3.5;discountValue=0} | Out-Null
+    $planState=Request '/companies/1/state'
+    Check (@($planState.plans | Where-Object name -eq 'AJUSTE TESTE').Count -eq 2) 'Plano de contas separado entre pagar e receber'
+    Request '/companies/1/titles' @{kind='receivable';description='CARTÃO COM TAXA';amount=10000;due=$today;category='AJUSTE TESTE';notes='';installments=1} | Out-Null
+    $cardTitle=@((Request '/companies/1/state').titles | Where-Object description -eq 'CARTÃO COM TAXA')[0]
+    Check ($cardTitle.discountMode -eq 'percentage' -and $cardTitle.discountRate -eq 3.5) 'Taxa percentual do plano copiada para o recebimento'
+    $beforeCard=@((Request '/companies/1/state').accounts | Where-Object id -eq 1)[0].balance
+    Request "/companies/1/titles/$($cardTitle.id)/settle" @{accountId=1;principal=10000;interest=0;penalty=0;discount=350;additional=0;date=$today} | Out-Null
+    $afterCard=@((Request '/companies/1/state').accounts | Where-Object id -eq 1)[0].balance
+    Check (($afterCard-$beforeCard) -eq 9650) 'Taxa da administradora reduz o valor recebido'
+    Request '/companies/1/titles' @{kind='payable';description='JUROS FIXOS';amount=10000;due=$today;category='AJUSTE TESTE';notes='';installments=1} | Out-Null
+    $fixedTitle=@((Request '/companies/1/state').titles | Where-Object description -eq 'JUROS FIXOS')[0]
+    Check ($fixedTitle.interestMode -eq 'value' -and $fixedTitle.interestValue -eq 275) 'Valor fixo do plano copiado para o pagamento'
+    $beforeFixed=@((Request '/companies/1/state').accounts | Where-Object id -eq 1)[0].balance
+    Request "/companies/1/titles/$($fixedTitle.id)/settle" @{accountId=1;principal=10000;interest=275;penalty=0;discount=0;additional=0;date=$today} | Out-Null
+    $afterFixed=@((Request '/companies/1/state').accounts | Where-Object id -eq 1)[0].balance
+    Check (($beforeFixed-$afterFixed) -eq 10275) 'Juros fixos aumentam o pagamento'
     $backup = Request '/backup' @{}
     Check (Test-Path -LiteralPath $backup.path) 'Backup SQLite criado'
     $before=Request '/companies/1/state'

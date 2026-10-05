@@ -2,6 +2,9 @@
 
 ## Versões iniciais
 
+- `1.1.17`: acesso local automático sem senha, planos de contas separados por
+  pagar e receber, taxas e ajustes por porcentagem ou valor, seleção geral de
+  parcelas e repetição mensal mantendo o valor integral em cada lançamento.
 - `1.1.16`: edição de demonstração independente, sem ativação de licença e
   sem atualização obrigatória, instalada em pastas separadas da edição comercial.
 - `1.1.15`: monitoramento moderno de contas a receber por cliente, com alertas
@@ -63,4 +66,4 @@ abertura até uma nova tentativa.
 O instalador `Monalisa-Financeiro-Teste-Base-1.1.0.exe` aponta para o Painel
 Central em `http://127.0.0.1:5200` e deve ser usado apenas na mesma máquina do
 painel. Para testar uma atualização, publique no painel uma versão superior à
-instalada. A versão `1.1.16` é a referência atual deste projeto.
+instalada. A versão `1.1.17` é a referência atual deste projeto.

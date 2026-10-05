@@ -260,4 +260,69 @@ void main() {
     await tester.pump();
     expect(find.textContaining('Total gerado: R\$ 200,00'), findsOneWidget);
   });
+
+  testWidgets('repetição mensal mostra o valor integral em cada lançamento', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(
+              onPressed: () => showDialog(
+                context: context,
+                builder: (_) => EntryDialog(
+                  title: 'Nova conta a pagar',
+                  fields: [
+                    FormFieldSpec(
+                      'amount',
+                      'Valor (R\$)',
+                      money: true,
+                      required: true,
+                    ),
+                    FormFieldSpec(
+                      'repeatMode',
+                      'Como deseja lançar esta despesa?',
+                      initial: 'single',
+                      options: const [
+                        MapEntry('single', 'CONTA ÚNICA'),
+                        MapEntry(
+                          'monthly_repeat',
+                          'REPETIR O MESMO VALOR TODO MÊS',
+                        ),
+                      ],
+                    ),
+                    FormFieldSpec(
+                      'installments',
+                      'Quantidade de lançamentos',
+                      initial: '1',
+                      visibleWhenKey: 'repeatMode',
+                      visibleWhenValues: const {'monthly_repeat'},
+                    ),
+                  ],
+                  save: (_) async {},
+                ),
+              ),
+              child: const Text('Abrir'),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Abrir'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('CONTA ÚNICA'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('REPETIR O MESMO VALOR TODO MÊS').last);
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextFormField).first, '61,35');
+    await tester.enterText(find.byType(TextFormField).last, '13');
+    await tester.pump();
+    expect(
+      find.textContaining(
+        '13 lançamentos de R\$ 61,35 todo mês. Total gerado: R\$ 797,55',
+      ),
+      findsOneWidget,
+    );
+  });
 }

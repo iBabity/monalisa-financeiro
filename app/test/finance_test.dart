@@ -47,6 +47,44 @@ void main() {
     ]);
   });
 
+  test('repetição mensal usa o valor integral em cada lançamento', () {
+    expect(repeatsEachTitle('monthly_repeat'), isTrue);
+    expect(generatedSeriesTotal(6135, 13, 'monthly_repeat'), 79755);
+    expect(scheduledAmounts(6135, 13, repeatEach: true), [
+      6135,
+      6135,
+      6135,
+      6135,
+      6135,
+      6135,
+      6135,
+      6135,
+      6135,
+      6135,
+      6135,
+      6135,
+      6135,
+    ]);
+  });
+
+  test('divisão mensal continua preservando somente o total informado', () {
+    expect(repeatsEachTitle('monthly'), isFalse);
+    expect(generatedSeriesTotal(6135, 13, 'monthly'), 6135);
+  });
+
+  test('selecionar todas considera somente contas abertas da lista', () {
+    final selectable = selectableTitleIds([
+      {'id': 1, 'cancelled': 0, 'remaining': 100},
+      {'id': 2, 'cancelled': 0, 'remaining': 50},
+      {'id': 3, 'cancelled': 1, 'remaining': 80},
+      {'id': 4, 'cancelled': 0, 'remaining': 0},
+    ]);
+    expect(selectable, {1, 2});
+    expect(selectAllState(selectable, {}), isFalse);
+    expect(selectAllState(selectable, {1}), isNull);
+    expect(selectAllState(selectable, {1, 2}), isTrue);
+  });
+
   test('parcelas mensais preservam o total e ajustam fim do mês', () {
     expect(scheduledAmounts(10000, 3), [3334, 3333, 3333]);
     expect(scheduledDues('2026-01-31', 3), [

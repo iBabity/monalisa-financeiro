@@ -3361,158 +3361,175 @@ class _WorkspaceState extends State<Workspace> {
     ];
   }
 
-  Widget titleTable(List<RecordData> list, {bool colorRows = false}) =>
-      list.isEmpty
-      ? empty('Nenhum lançamento por aqui. Comece pelo botão acima.')
-      : LayoutBuilder(
-          builder: (context, constraints) => SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: ConstrainedBox(
-              constraints: BoxConstraints(minWidth: constraints.maxWidth),
-              child: DataTable(
-                horizontalMargin: 0,
-                columnSpacing: 23,
-                headingRowHeight: 38,
-                dataRowMinHeight: 65,
-                dataRowMaxHeight: 65,
-                columns:
-                    [
-                          '',
-                          'Descrição / pessoa',
-                          'Vencimento',
-                          'Valor',
-                          'Em aberto',
-                          'Situação',
-                          '',
-                        ]
-                        .map(
-                          (s) => DataColumn(
-                            label: Text(
-                              s,
-                              style: TextStyle(color: mutedText, fontSize: 12),
-                            ),
-                          ),
-                        )
-                        .toList(),
-                rows: list
-                    .map(
-                      (t) => DataRow(
-                        color: colorRows
-                            ? WidgetStatePropertyAll(
-                                statusColor(status(t)).withValues(alpha: .035),
-                              )
-                            : null,
-                        cells: [
-                          DataCell(
-                            Checkbox(
-                              value: selectedTitleIds.contains(t['id']),
-                              onChanged:
-                                  t['cancelled'] == 0 && t['remaining'] > 0
-                                  ? (checked) => setState(() {
-                                      if (checked == true) {
-                                        selectedTitleIds.add(t['id']);
-                                      } else {
-                                        selectedTitleIds.remove(t['id']);
-                                      }
-                                    })
-                                  : null,
-                            ),
-                          ),
-                          DataCell(
-                            SizedBox(
-                              width: 215,
-                              child: Column(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    t['description'],
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                      fontWeight: FontWeight.w600,
-                                      fontSize: 13,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 4),
-                                  Text(
-                                    [
-                                      t['partyName'] ?? 'SEM PESSOA VINCULADA',
-                                      if ((t['documentNumber'] ?? '')
-                                          .toString()
-                                          .isNotEmpty)
-                                        t['documentNumber'],
-                                      if ((t['costCenter'] ?? '')
-                                          .toString()
-                                          .isNotEmpty)
-                                        t['costCenter'],
-                                      if ((t['branch'] ?? '')
-                                          .toString()
-                                          .isNotEmpty)
-                                        t['branch'],
-                                    ].join(' • '),
-                                    style: TextStyle(
-                                      fontSize: 11,
-                                      color: faintText,
-                                    ),
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                          DataCell(
-                            Text(
-                              dateLabel(t['due']),
-                              style: const TextStyle(fontSize: 12),
-                            ),
-                          ),
-                          DataCell(
-                            Text(
-                              money(t['amount']),
-                              style: const TextStyle(fontSize: 12),
-                            ),
-                          ),
-                          DataCell(
-                            Text(
-                              money(t['remaining']),
-                              style: const TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ),
-                          DataCell(badge(status(t))),
-                          DataCell(
-                            Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                if (t['cancelled'] == 0 && t['remaining'] > 0)
-                                  TextButton(
-                                    onPressed: () => settleForm(t),
-                                    child: Text(
-                                      t['kind'] == 'payable'
-                                          ? 'Pagar'
-                                          : 'Receber',
-                                    ),
-                                  ),
-                                IconButton(
-                                  tooltip: 'Detalhes e histórico',
-                                  icon: const Icon(Icons.more_horiz),
-                                  onPressed: () => details(t),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                    )
-                    .toList(),
+  Widget titleTable(List<RecordData> list, {bool colorRows = false}) {
+    if (list.isEmpty) {
+      return empty('Nenhum lançamento por aqui. Comece pelo botão acima.');
+    }
+    final eligibleIds = selectableTitleIds(list);
+    final selectAllValue = selectAllState(eligibleIds, selectedTitleIds);
+    return LayoutBuilder(
+      builder: (context, constraints) => SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(minWidth: constraints.maxWidth),
+          child: DataTable(
+            horizontalMargin: 0,
+            columnSpacing: 23,
+            headingRowHeight: 38,
+            dataRowMinHeight: 65,
+            dataRowMaxHeight: 65,
+            columns: [
+              DataColumn(
+                label: Tooltip(
+                  message: selectAllValue == true
+                      ? 'Desmarcar todas as contas exibidas'
+                      : 'Selecionar todas as contas em aberto exibidas',
+                  child: Checkbox(
+                    tristate: true,
+                    value: selectAllValue,
+                    onChanged: eligibleIds.isEmpty
+                        ? null
+                        : (checked) => setState(() {
+                            if (checked == true) {
+                              selectedTitleIds.addAll(eligibleIds);
+                            } else {
+                              selectedTitleIds.removeAll(eligibleIds);
+                            }
+                          }),
+                  ),
+                ),
               ),
-            ),
+              for (final label in [
+                'Descrição / pessoa',
+                'Vencimento',
+                'Valor',
+                'Em aberto',
+                'Situação',
+                '',
+              ])
+                DataColumn(
+                  label: Text(
+                    label,
+                    style: TextStyle(color: mutedText, fontSize: 12),
+                  ),
+                ),
+            ],
+            rows: list
+                .map(
+                  (t) => DataRow(
+                    color: colorRows
+                        ? WidgetStatePropertyAll(
+                            statusColor(status(t)).withValues(alpha: .035),
+                          )
+                        : null,
+                    cells: [
+                      DataCell(
+                        Checkbox(
+                          value: selectedTitleIds.contains(t['id']),
+                          onChanged: t['cancelled'] == 0 && t['remaining'] > 0
+                              ? (checked) => setState(() {
+                                  if (checked == true) {
+                                    selectedTitleIds.add(t['id']);
+                                  } else {
+                                    selectedTitleIds.remove(t['id']);
+                                  }
+                                })
+                              : null,
+                        ),
+                      ),
+                      DataCell(
+                        SizedBox(
+                          width: 215,
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                t['description'],
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 13,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                [
+                                  t['partyName'] ?? 'SEM PESSOA VINCULADA',
+                                  if ((t['documentNumber'] ?? '')
+                                      .toString()
+                                      .isNotEmpty)
+                                    t['documentNumber'],
+                                  if ((t['costCenter'] ?? '')
+                                      .toString()
+                                      .isNotEmpty)
+                                    t['costCenter'],
+                                  if ((t['branch'] ?? '').toString().isNotEmpty)
+                                    t['branch'],
+                                ].join(' • '),
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: faintText,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      DataCell(
+                        Text(
+                          dateLabel(t['due']),
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                      ),
+                      DataCell(
+                        Text(
+                          money(t['amount']),
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                      ),
+                      DataCell(
+                        Text(
+                          money(t['remaining']),
+                          style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                      DataCell(badge(status(t))),
+                      DataCell(
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if (t['cancelled'] == 0 && t['remaining'] > 0)
+                              TextButton(
+                                onPressed: () => settleForm(t),
+                                child: Text(
+                                  t['kind'] == 'payable' ? 'Pagar' : 'Receber',
+                                ),
+                              ),
+                            IconButton(
+                              tooltip: 'Detalhes e histórico',
+                              icon: const Icon(Icons.more_horiz),
+                              onPressed: () => details(t),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                )
+                .toList(),
           ),
-        );
+        ),
+      ),
+    );
+  }
+
   Widget badge(String text) {
     final color = statusColor(text);
     return Container(
@@ -3883,6 +3900,68 @@ class _WorkspaceState extends State<Workspace> {
     );
   }
 
+  String planRule(RecordData plan, String prefix, String label) {
+    final mode = plan['${prefix}Mode'] ?? 'percentage';
+    final value = mode == 'value'
+        ? money(plan['${prefix}Value'] ?? 0)
+        : '${plan['${prefix}Rate'] ?? 0}%';
+    return '$label: $value';
+  }
+
+  Widget planList(String kind) {
+    final filtered = plans.where((plan) => plan['kind'] == kind).toList();
+    if (filtered.isEmpty) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 12),
+        child: Text('NENHUM PLANO CADASTRADO NESTE GRUPO.'),
+      );
+    }
+    return Column(
+      children: filtered
+          .map(
+            (p) => ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(
+                kind == 'payable'
+                    ? Icons.arrow_upward_rounded
+                    : Icons.arrow_downward_rounded,
+                color: kind == 'payable' ? Colors.deepOrange : Colors.green,
+              ),
+              title: Text(p['name']),
+              subtitle: Text(
+                [
+                  planRule(p, 'interest', 'JUROS'),
+                  planRule(p, 'penalty', 'MULTA'),
+                  planRule(
+                    p,
+                    'discount',
+                    kind == 'receivable' ? 'TAXA / DESCONTO' : 'DESCONTO',
+                  ),
+                ].join('  •  '),
+              ),
+              trailing: canManagePlanRates
+                  ? Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          tooltip: 'Editar plano',
+                          icon: const Icon(Icons.edit_outlined),
+                          onPressed: () => planForm(p),
+                        ),
+                        IconButton(
+                          tooltip: 'Excluir plano',
+                          icon: const Icon(Icons.delete_outline),
+                          onPressed: () => deleteRegistry('plan', p),
+                        ),
+                      ],
+                    )
+                  : const Chip(label: Text('SOMENTE CONSULTA')),
+            ),
+          )
+          .toList(),
+    );
+  }
+
   List<Widget> registryPage() => [
     TextField(
       decoration: const InputDecoration(
@@ -3913,42 +3992,23 @@ class _WorkspaceState extends State<Workspace> {
     ),
     const SizedBox(height: 12),
     registrySection(
-      title: 'Planos de contas',
-      subtitle: '${plans.length} PLANOS CADASTRADOS',
-      icon: Icons.account_tree_outlined,
-      onAdd: canManagePlanRates ? planForm : null,
-      addLabel: 'Adicionar plano de contas',
-      child: Column(
-        children: plans
-            .map(
-              (p) => ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.account_tree_outlined, color: teal),
-                title: Text(p['name']),
-                subtitle: Text(
-                  'Juros: ${p['interestRate']}%  •  Multa: ${p['penaltyRate']}%  •  Desconto: ${p['discountRate']}%',
-                ),
-                trailing: canManagePlanRates
-                    ? Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          IconButton(
-                            tooltip: 'Editar plano',
-                            icon: const Icon(Icons.edit_outlined),
-                            onPressed: () => planForm(p),
-                          ),
-                          IconButton(
-                            tooltip: 'Excluir plano',
-                            icon: const Icon(Icons.delete_outline),
-                            onPressed: () => deleteRegistry('plan', p),
-                          ),
-                        ],
-                      )
-                    : const Chip(label: Text('SOMENTE CONSULTA')),
-              ),
-            )
-            .toList(),
-      ),
+      title: 'Planos de contas — A pagar',
+      subtitle:
+          '${plans.where((item) => item['kind'] == 'payable').length} PLANOS DE DESPESA',
+      icon: Icons.arrow_upward_rounded,
+      onAdd: canManagePlanRates ? () => planForm(null, 'payable') : null,
+      addLabel: 'Adicionar plano a pagar',
+      child: planList('payable'),
+    ),
+    const SizedBox(height: 12),
+    registrySection(
+      title: 'Planos de contas — A receber',
+      subtitle:
+          '${plans.where((item) => item['kind'] == 'receivable').length} PLANOS DE RECEITA',
+      icon: Icons.arrow_downward_rounded,
+      onAdd: canManagePlanRates ? () => planForm(null, 'receivable') : null,
+      addLabel: 'Adicionar plano a receber',
+      child: planList('receivable'),
     ),
     const SizedBox(height: 12),
     registrySection(
@@ -4260,7 +4320,10 @@ class _WorkspaceState extends State<Workspace> {
           initial: '',
           required: true,
           hint: 'Digite para buscar ou criar um plano',
-          suggestions: plans.map((p) => p['name'] as String).toList(),
+          suggestions: plans
+              .where((p) => p['kind'] == kind)
+              .map((p) => p['name'] as String)
+              .toList(),
         ),
         if (hasMatrixOrBranch)
           FormFieldSpec(
@@ -4364,10 +4427,7 @@ class _WorkspaceState extends State<Workspace> {
             ? 1
             : int.tryParse(v['installments']!) ?? 0;
         final enteredAmount = parseMoney(v['amount']!);
-        final repeating =
-            repeatMode == 'weekly' ||
-            repeatMode == 'monthly_repeat' ||
-            repeatMode == 'custom';
+        final repeating = repeatsEachTitle(repeatMode);
         final intervalDays = repeatMode == 'weekly'
             ? 7
             : repeatMode == 'custom'
@@ -4377,9 +4437,11 @@ class _WorkspaceState extends State<Workspace> {
             (intervalDays < 1 || intervalDays > 365)) {
           throw Exception('Informe um intervalo entre 1 e 365 dias.');
         }
-        final totalAmount = repeating
-            ? enteredAmount * installmentCount
-            : enteredAmount;
+        final totalAmount = generatedSeriesTotal(
+          enteredAmount,
+          installmentCount,
+          repeatMode,
+        );
         final schedule = installmentCount > 1
             ? await installmentSchedule(
                 totalAmount,
@@ -4514,8 +4576,12 @@ class _WorkspaceState extends State<Workspace> {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 Text(
-                  intervalDays == 7
-                      ? '$count lançamentos de ${money(repeatedAmount!)} a cada 7 dias. Total: ${money(totalAmount)}. Você pode ajustar valores e vencimentos.'
+                  repeatedAmount != null
+                      ? '$count lançamentos de ${money(repeatedAmount)} ${intervalDays == 0
+                            ? 'todo mês'
+                            : intervalDays == 7
+                            ? 'a cada 7 dias'
+                            : 'a cada $intervalDays dias'}. Total: ${money(totalAmount)}. Você pode ajustar valores e vencimentos.'
                       : 'Valor total: ${money(totalAmount)}. Ajuste valores e vencimentos; a soma deve fechar o total.',
                 ),
                 if (errorText != null)
@@ -4942,8 +5008,17 @@ class _WorkspaceState extends State<Workspace> {
 
   void settleForm(RecordData t) {
     final path = '$base/titles/${t['id']}/settle';
-    int suggested(String key) =>
-        ((t['remaining'] as num) * ((t[key] ?? 0) as num) / 100).round();
+    int suggested(String prefix) {
+      if ((t['${prefix}Mode'] ?? 'percentage') == 'value') {
+        return (t['${prefix}Value'] ?? 0) as int;
+      }
+      return ((t['remaining'] as num) *
+              ((t['${prefix}Rate'] ?? 0) as num) /
+              100)
+          .round();
+    }
+
+    final receivable = t['kind'] == 'receivable';
     form(
       t['kind'] == 'payable' ? 'Registrar pagamento' : 'Registrar recebimento',
       [
@@ -4987,22 +5062,24 @@ class _WorkspaceState extends State<Workspace> {
         ),
         FormFieldSpec(
           'interest',
-          'Juros (R\$)',
-          initial: inputMoney(suggested('interestRate')),
+          'Juros — acréscimo (R\$)',
+          initial: inputMoney(suggested('interest')),
           money: true,
           advanced: true,
         ),
         FormFieldSpec(
           'penalty',
-          'Multa (R\$)',
-          initial: inputMoney(suggested('penaltyRate')),
+          'Multa — acréscimo (R\$)',
+          initial: inputMoney(suggested('penalty')),
           money: true,
           advanced: true,
         ),
         FormFieldSpec(
           'discount',
-          'Desconto (R\$)',
-          initial: inputMoney(suggested('discountRate')),
+          receivable
+              ? 'Taxa da administradora ou desconto — reduz o recebimento (R\$)'
+              : 'Desconto — reduz o pagamento (R\$)',
+          initial: inputMoney(suggested('discount')),
           money: true,
           advanced: true,
         ),
@@ -5027,7 +5104,7 @@ class _WorkspaceState extends State<Workspace> {
         });
       },
       note:
-          '${t['description']} • Em aberto: ${money(t['remaining'])}\nMovimento no caixa = principal + juros + multa + outros acréscimos − desconto. Para baixa parcial, reduza o principal.',
+          '${t['description']} • Em aberto: ${money(t['remaining'])}\n${receivable ? 'Valor que entra na conta' : 'Valor que sai da conta'} = principal + juros + multa + outros acréscimos − ${receivable ? 'taxa/desconto' : 'desconto'}. Para baixa parcial, reduza o principal.',
     );
   }
 
@@ -5176,7 +5253,7 @@ class _WorkspaceState extends State<Workspace> {
     );
   }
 
-  void planForm([RecordData? plan]) {
+  void planForm([RecordData? plan, String defaultKind = 'payable']) {
     if (!canManagePlanRates) {
       message(
         'O ADMINISTRADOR DA EMPRESA BLOQUEOU A ALTERAÇÃO DE JUROS, MULTA E DESCONTO.',
@@ -5194,34 +5271,109 @@ class _WorkspaceState extends State<Workspace> {
           hint: 'Ex.: Energia elétrica',
         ),
         FormFieldSpec(
+          'kind',
+          'Usar este plano em',
+          initial: plan?['kind'] ?? defaultKind,
+          required: true,
+          options: const [
+            MapEntry('payable', 'CONTAS A PAGAR'),
+            MapEntry('receivable', 'CONTAS A RECEBER'),
+          ],
+        ),
+        FormFieldSpec(
+          'interestMode',
+          'Como calcular os juros?',
+          initial: plan?['interestMode'] ?? 'percentage',
+          options: const [
+            MapEntry('percentage', 'PORCENTAGEM (%)'),
+            MapEntry('value', 'VALOR FIXO (R\$)'),
+          ],
+        ),
+        FormFieldSpec(
           'interestRate',
           'Juros padrão (%)',
           initial: '${plan?['interestRate'] ?? 0}',
+          visibleWhenKey: 'interestMode',
+          visibleWhenValues: const {'percentage'},
+        ),
+        FormFieldSpec(
+          'interestValue',
+          'Juros padrão (R\$)',
+          initial: inputMoney(plan?['interestValue'] ?? 0),
+          money: true,
+          visibleWhenKey: 'interestMode',
+          visibleWhenValues: const {'value'},
+        ),
+        FormFieldSpec(
+          'penaltyMode',
+          'Como calcular a multa?',
+          initial: plan?['penaltyMode'] ?? 'percentage',
+          options: const [
+            MapEntry('percentage', 'PORCENTAGEM (%)'),
+            MapEntry('value', 'VALOR FIXO (R\$)'),
+          ],
         ),
         FormFieldSpec(
           'penaltyRate',
           'Multa padrão (%)',
           initial: '${plan?['penaltyRate'] ?? 0}',
+          visibleWhenKey: 'penaltyMode',
+          visibleWhenValues: const {'percentage'},
+        ),
+        FormFieldSpec(
+          'penaltyValue',
+          'Multa padrão (R\$)',
+          initial: inputMoney(plan?['penaltyValue'] ?? 0),
+          money: true,
+          visibleWhenKey: 'penaltyMode',
+          visibleWhenValues: const {'value'},
+        ),
+        FormFieldSpec(
+          'discountMode',
+          'Como calcular a taxa ou desconto?',
+          initial: plan?['discountMode'] ?? 'percentage',
+          options: const [
+            MapEntry('percentage', 'PORCENTAGEM (%)'),
+            MapEntry('value', 'VALOR FIXO (R\$)'),
+          ],
         ),
         FormFieldSpec(
           'discountRate',
-          'Desconto padrão (%)',
+          'Taxa ou desconto padrão (%)',
           initial: '${plan?['discountRate'] ?? 0}',
+          visibleWhenKey: 'discountMode',
+          visibleWhenValues: const {'percentage'},
+        ),
+        FormFieldSpec(
+          'discountValue',
+          'Taxa ou desconto padrão (R\$)',
+          initial: inputMoney(plan?['discountValue'] ?? 0),
+          money: true,
+          visibleWhenKey: 'discountMode',
+          visibleWhenValues: const {'value'},
         ),
       ],
       (v) async {
-        double rate(String key) => double.parse(v[key]!.replaceAll(',', '.'));
+        double rate(String key) =>
+            double.tryParse((v[key] ?? '0').replaceAll(',', '.')) ?? 0;
         await api.request(
           plan == null ? '$base/plans' : '$base/plans/${plan['id']}/edit',
           {
             'name': v['name'],
+            'kind': v['kind'],
             'interestRate': rate('interestRate'),
+            'interestMode': v['interestMode'],
+            'interestValue': parseMoney(v['interestValue'] ?? '0'),
             'penaltyRate': rate('penaltyRate'),
+            'penaltyMode': v['penaltyMode'],
+            'penaltyValue': parseMoney(v['penaltyValue'] ?? '0'),
             'discountRate': rate('discountRate'),
+            'discountMode': v['discountMode'],
+            'discountValue': parseMoney(v['discountValue'] ?? '0'),
           },
         );
       },
-      note: 'Esses percentuais serão sugeridos automaticamente ao registrar a baixa de lançamentos vinculados a este plano.',
+      note: 'Você pode usar porcentagem ou valor fixo. Em contas a receber, cadastre a taxa da administradora do cartão em TAXA OU DESCONTO: ela será subtraída do valor que entra na conta. Juros e multa continuam sendo acréscimos.',
     );
   }
 
@@ -6073,6 +6225,10 @@ class _WorkspaceState extends State<Workspace> {
           'category',
           'Plano de contas',
           initial: t['category'] ?? '',
+          suggestions: plans
+              .where((plan) => plan['kind'] == t['kind'])
+              .map((plan) => plan['name'] as String)
+              .toList(),
         ),
         if (hasMatrixOrBranch)
           FormFieldSpec(

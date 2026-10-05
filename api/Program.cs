@@ -13,6 +13,7 @@ builder.Services.AddSingleton<Ledger>();
 builder.Services.AddSingleton<AuthSessions>();
 builder.Services.AddSingleton<LicenseGuard>();
 var app = builder.Build();
+var localNoLogin=Environment.GetEnvironmentVariable("MONALISA_NO_LOGIN")=="1";
 var networkRole=(Environment.GetEnvironmentVariable("MONALISA_NETWORK_ROLE")??"standalone").Trim().ToLowerInvariant();
 var dataServerUrl=(Environment.GetEnvironmentVariable("MONALISA_DATA_SERVER_URL")??"").Trim().TrimEnd('/');
 var networkKey=(Environment.GetEnvironmentVariable("MONALISA_NETWORK_KEY")??"").Trim();
@@ -41,7 +42,7 @@ app.Use(async(ctx,next)=>{
 });
 app.Use(async (ctx, next) => {
     if(!ctx.Request.Path.StartsWithSegments("/api") || ctx.Request.Path.StartsWithSegments("/api/health") ||
-       ctx.Request.Path.StartsWithSegments("/api/license") || ctx.Request.Path.StartsWithSegments("/api/auth/bootstrap") || ctx.Request.Path.StartsWithSegments("/api/auth/login")) { await next(); return; }
+       ctx.Request.Path.StartsWithSegments("/api/license") || ctx.Request.Path.StartsWithSegments("/api/auth/bootstrap") || ctx.Request.Path.StartsWithSegments("/api/auth/login") || ctx.Request.Path.StartsWithSegments("/api/auth/local")) { await next(); return; }
     if(clientMode){await next();return;}
     var db=ctx.RequestServices.GetRequiredService<Ledger>();
     if(Environment.GetEnvironmentVariable("FINANCE_AUTH_DISABLED")=="1") { await next(); return; }
@@ -101,13 +102,17 @@ app.MapGet("/api/license/status", async (LicenseGuard license,Ledger db) => {var
 app.MapPost("/api/license/activate", async (LicenseActivationInput x,LicenseGuard license,Ledger db) => {var result=await license.Activate(x.ActivationKey);db.ApplyLicensedCompany(result);return result;});
 app.MapPost("/api/license/change", async (LicenseActivationInput x,LicenseGuard license,Ledger db) => {var result=await license.Change(x.ActivationKey);db.ApplyLicensedCompany(result);return result;});
 app.MapPost("/api/license/refresh", async (LicenseGuard license,Ledger db) => {var result=await license.Status(true);db.ApplyLicensedCompany(result);return result;});
-app.MapGet("/api/auth/bootstrap", (Ledger db) => new { needsSetup=!db.HasUsers() });
+app.MapGet("/api/auth/bootstrap", (Ledger db) => new { needsSetup=!localNoLogin&&!db.HasUsers(),noLogin=localNoLogin });
 app.MapPost("/api/auth/bootstrap", (BootstrapInput x, Ledger db, AuthSessions sessions) => {
     var user=db.SetupAdministrator(x);var token=sessions.Create(user);return new {token,user=db.AccessContext(user)};
 });
 app.MapPost("/api/auth/login", (LoginInput x, Ledger db, AuthSessions sessions) => {
     var user=db.Authenticate(x);
     var token=sessions.Create(user);return new {token,user=db.AccessContext(user)};
+});
+app.MapPost("/api/auth/local", (Ledger db, AuthSessions sessions) => {
+    if(!localNoLogin)throw new ArgumentException("O acesso automático não está habilitado nesta instalação.");
+    var user=db.LocalAdministrator();var token=sessions.Create(user);return new {token,user=db.AccessContext(user)};
 });
 app.MapPost("/api/auth/logout", (HttpContext context, AuthSessions sessions) => {
     var header=context.Request.Headers.Authorization.ToString();if(header.StartsWith("Bearer ",StringComparison.OrdinalIgnoreCase))sessions.Remove(header[7..].Trim());return new{ok=true};
@@ -241,7 +246,11 @@ record LinkUserInput(string Role="admin",bool CanManagePlanRates=false);
 record AccessUpdateInput(string Role="admin",bool Active=true,bool CanManagePlanRates=false);
 record PartyInput(string Name,string Document,string Type,string Phone="",string Email="",string PersonType="");
 record AccountInput(string Name,long Opening,string Type="cash");
-record PlanInput(string Name,decimal InterestRate=0,decimal PenaltyRate=0,decimal DiscountRate=0);
+record PlanInput(
+    string Name,string Kind="payable",
+    decimal InterestRate=0,string InterestMode="percentage",long InterestValue=0,
+    decimal PenaltyRate=0,string PenaltyMode="percentage",long PenaltyValue=0,
+    decimal DiscountRate=0,string DiscountMode="percentage",long DiscountValue=0);
 record NamedInput(string Name);
 record NamedKindInput(string Name,string Kind="both");
 record TitleInput(string Kind,string Description,long Amount,string Due,int? PartyId,string Category,string Notes,int Installments = 1,decimal InterestRate = 0,decimal PenaltyRate = 0,decimal DiscountRate = 0,long[]? InstallmentAmounts = null,string[]? InstallmentDues = null,string DocumentNumber = "",string IssueDate = "",string Branch = "",string CostCenter = "",int InstallmentIntervalDays = 0,int? PaymentMethodId=null);
@@ -280,7 +289,13 @@ sealed class Ledger {
         CREATE TABLE IF NOT EXISTS companies(id INTEGER PRIMARY KEY,name TEXT NOT NULL,cnpj TEXT NOT NULL UNIQUE);
         CREATE TABLE IF NOT EXISTS parties(id INTEGER PRIMARY KEY,companyId INTEGER NOT NULL REFERENCES companies(id),name TEXT NOT NULL,document TEXT NOT NULL,type TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY,companyId INTEGER NOT NULL REFERENCES companies(id),name TEXT NOT NULL,opening INTEGER NOT NULL);
-        CREATE TABLE IF NOT EXISTS plans(id INTEGER PRIMARY KEY,companyId INTEGER NOT NULL REFERENCES companies(id),name TEXT NOT NULL,interestRate REAL NOT NULL DEFAULT 0,penaltyRate REAL NOT NULL DEFAULT 0,discountRate REAL NOT NULL DEFAULT 0,UNIQUE(companyId,name));
+        CREATE TABLE IF NOT EXISTS plans(
+            id INTEGER PRIMARY KEY,companyId INTEGER NOT NULL REFERENCES companies(id),
+            name TEXT NOT NULL,kind TEXT NOT NULL DEFAULT 'payable' CHECK(kind IN ('payable','receivable')),
+            interestRate REAL NOT NULL DEFAULT 0,interestMode TEXT NOT NULL DEFAULT 'percentage' CHECK(interestMode IN ('percentage','value')),interestValue INTEGER NOT NULL DEFAULT 0,
+            penaltyRate REAL NOT NULL DEFAULT 0,penaltyMode TEXT NOT NULL DEFAULT 'percentage' CHECK(penaltyMode IN ('percentage','value')),penaltyValue INTEGER NOT NULL DEFAULT 0,
+            discountRate REAL NOT NULL DEFAULT 0,discountMode TEXT NOT NULL DEFAULT 'percentage' CHECK(discountMode IN ('percentage','value')),discountValue INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(companyId,kind,name));
         CREATE TABLE IF NOT EXISTS titles(id INTEGER PRIMARY KEY,companyId INTEGER NOT NULL REFERENCES companies(id),kind TEXT NOT NULL CHECK(kind IN ('payable','receivable')),description TEXT NOT NULL,amount INTEGER NOT NULL CHECK(amount>0),due TEXT NOT NULL,partyId INTEGER REFERENCES parties(id),category TEXT NOT NULL,notes TEXT NOT NULL,cancelled INTEGER NOT NULL DEFAULT 0,created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS settlements(id INTEGER PRIMARY KEY,companyId INTEGER NOT NULL REFERENCES companies(id),titleId INTEGER NOT NULL REFERENCES titles(id),accountId INTEGER NOT NULL REFERENCES accounts(id),principal INTEGER NOT NULL CHECK(principal>0),interest INTEGER NOT NULL,penalty INTEGER NOT NULL,discount INTEGER NOT NULL,date TEXT NOT NULL,reversed INTEGER NOT NULL DEFAULT 0,reason TEXT NOT NULL DEFAULT '');
         CREATE TABLE IF NOT EXISTS movements(id INTEGER PRIMARY KEY,companyId INTEGER NOT NULL REFERENCES companies(id),accountId INTEGER NOT NULL REFERENCES accounts(id),amount INTEGER NOT NULL,date TEXT NOT NULL,description TEXT NOT NULL,settlementId INTEGER REFERENCES settlements(id));
@@ -346,7 +361,6 @@ sealed class Ledger {
             Run(c,"INSERT INTO companies(name,cnpj) VALUES('EMPRESA AGUARDANDO ATIVAÇÃO','LICENCA-PENDENTE')");
             Run(c,"INSERT INTO accounts(companyId,name,opening) VALUES(1,'CAIXA',0)");
         }
-        foreach(var company in Query(c,"SELECT id FROM companies")) SeedPlans(c,Convert.ToInt32(company["id"]));
         var currentVersion=Convert.ToInt32(Query(c,"PRAGMA user_version")[0]["user_version"]);
         if(currentVersion<8) {
             foreach(var tableColumn in new[]{("companies","name"),("parties","name"),("accounts","name"),("plans","name"),("titles","description"),("titles","category"),("titles","notes"),("settlements","reason")})
@@ -434,7 +448,46 @@ sealed class Ledger {
                 PRAGMA user_version=13;
                 """);
         }
-        foreach(var company in Query(c,"SELECT id FROM companies")) SeedAuxiliaries(c,Convert.ToInt32(company["id"]));
+        currentVersion=Convert.ToInt32(Query(c,"PRAGMA user_version")[0]["user_version"]);
+        if(currentVersion<14) {
+            if(Query(c,"SELECT id FROM titles LIMIT 1").Count>0)Backup();
+            if(!Query(c,"PRAGMA table_info(plans)").Any(row=>(string)row["name"]! == "kind")) {
+                var legacyPlans=Query(c,"SELECT * FROM plans ORDER BY id");
+                Run(c,"""
+                    ALTER TABLE plans RENAME TO plans_legacy;
+                    CREATE TABLE plans(
+                        id INTEGER PRIMARY KEY,companyId INTEGER NOT NULL REFERENCES companies(id),
+                        name TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('payable','receivable')),
+                        interestRate REAL NOT NULL DEFAULT 0,interestMode TEXT NOT NULL DEFAULT 'percentage' CHECK(interestMode IN ('percentage','value')),interestValue INTEGER NOT NULL DEFAULT 0,
+                        penaltyRate REAL NOT NULL DEFAULT 0,penaltyMode TEXT NOT NULL DEFAULT 'percentage' CHECK(penaltyMode IN ('percentage','value')),penaltyValue INTEGER NOT NULL DEFAULT 0,
+                        discountRate REAL NOT NULL DEFAULT 0,discountMode TEXT NOT NULL DEFAULT 'percentage' CHECK(discountMode IN ('percentage','value')),discountValue INTEGER NOT NULL DEFAULT 0,
+                        UNIQUE(companyId,kind,name));
+                    """);
+                foreach(var plan in legacyPlans) {
+                    var companyId=Convert.ToInt32(Number(plan,"companyId"));var name=(string)plan["name"]!;
+                    var usedKinds=Query(c,"SELECT DISTINCT kind FROM titles WHERE companyId=@p0 AND upper(category)=upper(@p1)",companyId,name).Select(row=>(string)row["kind"]!).ToList();
+                    if(usedKinds.Count==0)usedKinds.Add(ReceivablePlanName(name)?"receivable":"payable");
+                    foreach(var kind in usedKinds.Distinct())Run(c,"INSERT INTO plans(companyId,name,kind,interestRate,penaltyRate,discountRate) VALUES(@p0,@p1,@p2,@p3,@p4,@p5)",companyId,name,kind,plan["interestRate"],plan["penaltyRate"],plan["discountRate"]);
+                }
+                Run(c,"DROP TABLE plans_legacy");
+            }
+            if(!Query(c,"PRAGMA table_info(titles)").Any(row=>(string)row["name"]! == "interestMode"))Run(c,"""
+                ALTER TABLE titles ADD COLUMN interestMode TEXT NOT NULL DEFAULT 'percentage';
+                ALTER TABLE titles ADD COLUMN interestValue INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE titles ADD COLUMN penaltyMode TEXT NOT NULL DEFAULT 'percentage';
+                ALTER TABLE titles ADD COLUMN penaltyValue INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE titles ADD COLUMN discountMode TEXT NOT NULL DEFAULT 'percentage';
+                ALTER TABLE titles ADD COLUMN discountValue INTEGER NOT NULL DEFAULT 0;
+                """);
+            Run(c,"""
+                UPDATE plans SET discountRate=interestRate,interestRate=0
+                WHERE kind='receivable' AND (upper(name) LIKE '%CARTÃO%' OR upper(name) LIKE '%CARTAO%') AND interestRate>0 AND discountRate=0;
+                UPDATE titles SET discountRate=interestRate,interestRate=0
+                WHERE kind='receivable' AND (upper(category) LIKE '%CARTÃO%' OR upper(category) LIKE '%CARTAO%') AND interestRate>0 AND discountRate=0;
+                PRAGMA user_version=14;
+                """);
+        }
+        foreach(var company in Query(c,"SELECT id FROM companies")) {var companyId=Convert.ToInt32(company["id"]);SeedPlans(c,companyId);SeedAuxiliaries(c,companyId);}
     }
     SqliteConnection Open() { var c = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource=path, ForeignKeys=true }.ToString()); c.Open(); return c; }
     static SqliteCommand Cmd(SqliteConnection c,string sql,params object?[] values) { var cmd=c.CreateCommand(); cmd.CommandText=sql; for(int i=0;i<values.Length;i++) cmd.Parameters.AddWithValue("@p"+i,values[i]??DBNull.Value); return cmd; }
@@ -451,7 +504,19 @@ sealed class Ledger {
     static string LinkedTitles(List<Dictionary<string,object?>> rows)=>string.Join(", ",rows.Select(row=>$"\"{row["description"]}\" (vencimento {Date((string)row["due"]!).ToString("dd/MM/yyyy")})"));
     static string LinkedMovements(List<Dictionary<string,object?>> rows)=>string.Join(", ",rows.Select(row=>$"\"{row["description"]}\" ({Date((string)row["date"]!).ToString("dd/MM/yyyy")})"));
     static void Audit(SqliteConnection c,int company,string action,object detail)=>Run(c,"INSERT INTO audit(companyId,action,detail) VALUES(@p0,@p1,@p2)",company,action,JsonSerializer.Serialize(detail));
-    static void SeedPlans(SqliteConnection c,int company) { foreach(var name in new[]{"DESPESAS GERAIS","FORNECEDORES","ALUGUEL E OCUPAÇÃO","IMPOSTOS E TAXAS","FOLHA DE PAGAMENTO","SERVIÇOS CONTRATADOS","RECEITAS DE VENDAS","RECEITAS DE SERVIÇOS"}) if(Query(c,"SELECT id FROM plans WHERE companyId=@p0 AND upper(name)=upper(@p1)",company,name).Count==0)Run(c,"INSERT INTO plans(companyId,name) VALUES(@p0,@p1)",company,name); }
+    static bool ReceivablePlanName(string name) {
+        var upper=name.ToUpperInvariant();
+        return upper.Contains("RECEITA")||upper.Contains("VENDA")||upper.Contains("CARTÃO")||upper.Contains("CARTAO")||upper.Contains("VALE")||upper.Contains("CONVÊNIO");
+    }
+    static string PlanKind(string? value){var kind=(value??"payable").Trim().ToLowerInvariant();if(kind is not ("payable" or "receivable"))throw new ArgumentException("Selecione se o plano pertence ao contas a pagar ou ao contas a receber.");return kind;}
+    static string AdjustmentMode(string? value){var mode=(value??"percentage").Trim().ToLowerInvariant();if(mode is not ("percentage" or "value"))throw new ArgumentException("Selecione percentual ou valor fixo.");return mode;}
+    static void ValidateAdjustment(string mode,decimal rate,long value,string label){if(mode=="percentage"&&(rate<0||rate>100))throw new ArgumentException($"{label}: o percentual deve ficar entre 0 e 100.");Money(value);}
+    static void SeedPlans(SqliteConnection c,int company) {
+        foreach(var name in new[]{"DESPESAS GERAIS","FORNECEDORES","ALUGUEL E OCUPAÇÃO","IMPOSTOS E TAXAS","FOLHA DE PAGAMENTO","SERVIÇOS CONTRATADOS"})
+            if(Query(c,"SELECT id FROM plans WHERE companyId=@p0 AND kind='payable' AND upper(name)=upper(@p1)",company,name).Count==0)Run(c,"INSERT INTO plans(companyId,name,kind) VALUES(@p0,@p1,'payable')",company,name);
+        foreach(var name in new[]{"RECEITAS DE VENDAS","RECEITAS DE SERVIÇOS","CARTÃO DE DÉBITO","CARTÃO DE CRÉDITO"})
+            if(Query(c,"SELECT id FROM plans WHERE companyId=@p0 AND kind='receivable' AND upper(name)=upper(@p1)",company,name).Count==0)Run(c,"INSERT INTO plans(companyId,name,kind) VALUES(@p0,@p1,'receivable')",company,name);
+    }
     static void SeedAuxiliaries(SqliteConnection c,int company) {
         foreach(var item in new[]{("DINHEIRO","both"),("PIX","both"),("BOLETO","both"),("TRANSFERÊNCIA BANCÁRIA","both"),("CARTÃO DE DÉBITO","receivable"),("CARTÃO DE CRÉDITO","receivable")})
             if(Query(c,"SELECT id FROM payment_methods WHERE companyId=@p0 AND upper(name)=upper(@p1)",company,item.Item1).Count==0)Run(c,"INSERT INTO payment_methods(companyId,name,kind) VALUES(@p0,@p1,@p2)",company,item.Item1,item.Item2);
@@ -460,6 +525,7 @@ sealed class Ledger {
     }
     object Write(Func<SqliteConnection,object> operation) { lock(gate){using var c=Open();using var tx=c.BeginTransaction();var result=operation(c);tx.Commit();return result;} }
     public bool HasUsers(){lock(gate){using var c=Open();return Query(c,"SELECT id FROM users LIMIT 1").Count>0;}}
+    public AuthIdentity LocalAdministrator(){lock(gate){using var c=Open();var rows=Query(c,"SELECT * FROM users WHERE username='LOCAL' LIMIT 1");if(rows.Count==0){var pin=HashPin(Convert.ToHexString(RandomNumberGenerator.GetBytes(16)));Run(c,"INSERT INTO users(name,username,pinSalt,pinHash,globalAdmin) VALUES('ACESSO LOCAL','LOCAL',@p0,@p1,1)",pin.Salt,pin.Hash);rows=Query(c,"SELECT * FROM users WHERE id=last_insert_rowid()");}else if(Number(rows[0],"active")==0||Number(rows[0],"globalAdmin")==0){Run(c,"UPDATE users SET active=1,globalAdmin=1,failedAttempts=0,lockedUntil='' WHERE id=@p0",rows[0]["id"]);rows=Query(c,"SELECT * FROM users WHERE id=@p0",rows[0]["id"]);}return Identity(rows[0]);}}
     public void ApplyLicensedCompany(LicenseSnapshot license){
         if(string.IsNullOrWhiteSpace(license.Company)||string.IsNullOrWhiteSpace(license.Cnpj))return;
         lock(gate){
@@ -524,9 +590,10 @@ sealed class Ledger {
     public object Account(int company,AccountInput x)=>Write(c=> {Company(c,company);if(x.Opening < -999999999999 || x.Opening > 999999999999)throw new ArgumentException("Saldo fora do limite.");Run(c,"INSERT INTO accounts(companyId,name,opening,type) VALUES(@p0,@p1,@p2,@p3)",company,Required(x.Name,"Nome"),x.Opening,AccountType(x.Type));Audit(c,company,"Cadastro de conta",x);return new {ok=true};});
     public object EditAccount(int company,int id,AccountInput x)=>Write(c=> {Existing(c,"accounts",id,company);if(x.Opening < -999999999999 || x.Opening > 999999999999)throw new ArgumentException("Saldo fora do limite.");Run(c,"UPDATE accounts SET name=@p0,opening=@p1,type=@p2 WHERE id=@p3",Required(x.Name,"Nome"),x.Opening,AccountType(x.Type),id);Audit(c,company,"Edição de conta",new{id,input=x});return new{ok=true};});
     public object DeleteAccount(int company,int id)=>Write(c=> {Existing(c,"accounts",id,company);var linked=Query(c,"SELECT description,date FROM movements WHERE accountId=@p0 ORDER BY date,id LIMIT 5",id);if(linked.Count>0)throw new ArgumentException("Não foi possível excluir. Esta conta está vinculada às movimentações: "+LinkedMovements(linked)+".");if(Query(c,"SELECT id FROM accounts WHERE companyId=@p0",company).Count<=1)throw new ArgumentException("Mantenha ao menos uma conta financeira para registrar as baixas.");var name=(string)Query(c,"SELECT name FROM accounts WHERE id=@p0",id)[0]["name"]!;Run(c,"DELETE FROM accounts WHERE id=@p0",id);Audit(c,company,"Exclusão de conta",new{id,name});return new{ok=true};});
-    public object Plan(int company,PlanInput x)=>Write(c=> {Company(c,company);var rates=new[]{x.InterestRate,x.PenaltyRate,x.DiscountRate};if(rates.Any(v=>v<0||v>100))throw new ArgumentException("Os percentuais devem ficar entre 0 e 100.");Run(c,"INSERT INTO plans(companyId,name,interestRate,penaltyRate,discountRate) VALUES(@p0,@p1,@p2,@p3,@p4)",company,Required(x.Name,"Plano de contas"),x.InterestRate,x.PenaltyRate,x.DiscountRate);Audit(c,company,"Cadastro de plano de contas",x);return new {ok=true};});
-    public object EditPlan(int company,int id,PlanInput x)=>Write(c=> {Existing(c,"plans",id,company);var rates=new[]{x.InterestRate,x.PenaltyRate,x.DiscountRate};if(rates.Any(v=>v<0||v>100))throw new ArgumentException("Os percentuais devem ficar entre 0 e 100.");var name=Required(x.Name,"Plano de contas");var old=(string)Query(c,"SELECT name FROM plans WHERE id=@p0",id)[0]["name"]!;Run(c,"UPDATE plans SET name=@p0,interestRate=@p1,penaltyRate=@p2,discountRate=@p3 WHERE id=@p4",name,x.InterestRate,x.PenaltyRate,x.DiscountRate,id);Run(c,"UPDATE titles SET category=@p0,interestRate=@p1,penaltyRate=@p2,discountRate=@p3 WHERE companyId=@p4 AND category=@p5 AND deleted=0 AND cancelled=0",name,x.InterestRate,x.PenaltyRate,x.DiscountRate,company,old);Audit(c,company,"Edição de plano de contas",new {id,old,input=x});return new {ok=true};});
-    public object DeletePlan(int company,int id)=>Write(c=> {Existing(c,"plans",id,company);var name=(string)Query(c,"SELECT name FROM plans WHERE id=@p0",id)[0]["name"]!;var linked=Query(c,"SELECT description,due FROM titles WHERE companyId=@p0 AND category=@p1 AND deleted=0 ORDER BY due,id LIMIT 5",company,name);if(linked.Count>0)throw new ArgumentException("Não foi possível excluir. Este plano de contas está vinculado aos lançamentos: "+LinkedTitles(linked)+".");Run(c,"DELETE FROM plans WHERE id=@p0",id);Audit(c,company,"Exclusão de plano de contas",new{id,name});return new{ok=true};});
+    static (string Kind,string InterestMode,string PenaltyMode,string DiscountMode) ValidatePlan(PlanInput x){var kind=PlanKind(x.Kind);var interestMode=AdjustmentMode(x.InterestMode);var penaltyMode=AdjustmentMode(x.PenaltyMode);var discountMode=AdjustmentMode(x.DiscountMode);ValidateAdjustment(interestMode,x.InterestRate,x.InterestValue,"Juros");ValidateAdjustment(penaltyMode,x.PenaltyRate,x.PenaltyValue,"Multa");ValidateAdjustment(discountMode,x.DiscountRate,x.DiscountValue,kind=="receivable"?"Taxa ou desconto":"Desconto");return(kind,interestMode,penaltyMode,discountMode);}
+    public object Plan(int company,PlanInput x)=>Write(c=> {Company(c,company);var rule=ValidatePlan(x);Run(c,"INSERT INTO plans(companyId,name,kind,interestRate,interestMode,interestValue,penaltyRate,penaltyMode,penaltyValue,discountRate,discountMode,discountValue) VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7,@p8,@p9,@p10,@p11)",company,Required(x.Name,"Plano de contas"),rule.Kind,x.InterestRate,rule.InterestMode,x.InterestValue,x.PenaltyRate,rule.PenaltyMode,x.PenaltyValue,x.DiscountRate,rule.DiscountMode,x.DiscountValue);Audit(c,company,"Cadastro de plano de contas",x);return new {ok=true};});
+    public object EditPlan(int company,int id,PlanInput x)=>Write(c=> {Existing(c,"plans",id,company);var rule=ValidatePlan(x);var name=Required(x.Name,"Plano de contas");var old=Query(c,"SELECT name,kind FROM plans WHERE id=@p0",id)[0];var oldName=(string)old["name"]!;var oldKind=(string)old["kind"]!;Run(c,"UPDATE plans SET name=@p0,kind=@p1,interestRate=@p2,interestMode=@p3,interestValue=@p4,penaltyRate=@p5,penaltyMode=@p6,penaltyValue=@p7,discountRate=@p8,discountMode=@p9,discountValue=@p10 WHERE id=@p11",name,rule.Kind,x.InterestRate,rule.InterestMode,x.InterestValue,x.PenaltyRate,rule.PenaltyMode,x.PenaltyValue,x.DiscountRate,rule.DiscountMode,x.DiscountValue,id);Run(c,"UPDATE titles SET category=@p0,interestRate=@p1,interestMode=@p2,interestValue=@p3,penaltyRate=@p4,penaltyMode=@p5,penaltyValue=@p6,discountRate=@p7,discountMode=@p8,discountValue=@p9 WHERE companyId=@p10 AND kind=@p11 AND category=@p12 AND deleted=0 AND cancelled=0",name,x.InterestRate,rule.InterestMode,x.InterestValue,x.PenaltyRate,rule.PenaltyMode,x.PenaltyValue,x.DiscountRate,rule.DiscountMode,x.DiscountValue,company,oldKind,oldName);Audit(c,company,"Edição de plano de contas",new {id,oldName,oldKind,input=x});return new {ok=true};});
+    public object DeletePlan(int company,int id)=>Write(c=> {Existing(c,"plans",id,company);var plan=Query(c,"SELECT name,kind FROM plans WHERE id=@p0",id)[0];var name=(string)plan["name"]!;var kind=(string)plan["kind"]!;var linked=Query(c,"SELECT description,due FROM titles WHERE companyId=@p0 AND kind=@p1 AND category=@p2 AND deleted=0 ORDER BY due,id LIMIT 5",company,kind,name);if(linked.Count>0)throw new ArgumentException("Não foi possível excluir. Este plano de contas está vinculado aos lançamentos: "+LinkedTitles(linked)+".");Run(c,"DELETE FROM plans WHERE id=@p0",id);Audit(c,company,"Exclusão de plano de contas",new{id,name,kind});return new{ok=true};});
     static string MethodKind(string? value){var kind=(value??"both").ToLowerInvariant();if(kind is not ("both" or "payable" or "receivable"))throw new ArgumentException("Uso da forma de pagamento inválido.");return kind;}
     public object PaymentMethod(int company,NamedKindInput x)=>Write(c=>{Company(c,company);Run(c,"INSERT INTO payment_methods(companyId,name,kind) VALUES(@p0,@p1,@p2)",company,Required(x.Name,"Forma de pagamento"),MethodKind(x.Kind));Audit(c,company,"Cadastro de forma de pagamento",x);return new{ok=true};});
     public object EditPaymentMethod(int company,int id,NamedKindInput x)=>Write(c=>{Existing(c,"payment_methods",id,company);var name=Required(x.Name,"Forma de pagamento");Run(c,"UPDATE payment_methods SET name=@p0,kind=@p1 WHERE id=@p2",name,MethodKind(x.Kind),id);Audit(c,company,"Edição de forma de pagamento",new{id,name});return new{ok=true};});
@@ -724,8 +791,8 @@ sealed class Ledger {
         var document=(x.DocumentNumber??"").Trim().ToUpperInvariant();var issue=string.IsNullOrWhiteSpace(x.IssueDate)?"":Date(x.IssueDate).ToString("yyyy-MM-dd");
         if(document.Length>0 && Query(c,"SELECT id FROM titles WHERE companyId=@p0 AND deleted=0 AND documentNumber=@p1 AND partyId IS @p2 LIMIT 1",company,document,x.PartyId).Count>0)throw new ArgumentException("Este documento já foi lançado para o mesmo fornecedor ou cliente.");
         var planName=(string.IsNullOrWhiteSpace(x.Category)?(x.Kind=="payable"?"DESPESAS GERAIS":"RECEITAS DE SERVIÇOS"):x.Category.Trim()).ToUpperInvariant();
-        var plan=Query(c,"SELECT * FROM plans WHERE companyId=@p0 AND lower(name)=lower(@p1)",company,planName).SingleOrDefault();
-        if(plan is null){Run(c,"INSERT INTO plans(companyId,name) VALUES(@p0,@p1)",company,planName);plan=Query(c,"SELECT * FROM plans WHERE id=last_insert_rowid()")[0];}
+        var plan=Query(c,"SELECT * FROM plans WHERE companyId=@p0 AND kind=@p1 AND lower(name)=lower(@p2)",company,x.Kind,planName).SingleOrDefault();
+        if(plan is null){Run(c,"INSERT INTO plans(companyId,name,kind) VALUES(@p0,@p1,@p2)",company,planName,x.Kind);plan=Query(c,"SELECT * FROM plans WHERE id=last_insert_rowid()")[0];}
         if(x.Installments<1||x.Installments>120||x.Amount<x.Installments)throw new ArgumentException("Informe entre 1 e 120 parcelas, com ao menos um centavo por parcela.");
         if(x.InstallmentIntervalDays<0||x.InstallmentIntervalDays>365)throw new ArgumentException("O intervalo deve ficar entre 1 e 365 dias, ou zero para mensal.");
         var custom=x.InstallmentAmounts is not null||x.InstallmentDues is not null;
@@ -736,7 +803,7 @@ sealed class Ledger {
         if(x.PaymentMethodId.HasValue){Existing(c,"payment_methods",x.PaymentMethodId.Value,company);var method=Query(c,"SELECT kind FROM payment_methods WHERE id=@p0",x.PaymentMethodId.Value)[0]["kind"] as string;if(method!="both"&&method!=x.Kind)throw new ArgumentException("A forma selecionada não atende este tipo de lançamento.");}
         var costCenter=RequiredOrEmpty(x.CostCenter);var existingCostCenter=costCenter.Length==0||Query(c,"SELECT id FROM cost_centers WHERE companyId=@p0 AND upper(name)=upper(@p1)",company,costCenter).Count>0;if(!existingCostCenter&&actor is not null&&IsFinancialUser(actor,company))throw new ArgumentException("Selecione um centro de custo já cadastrado pelo administrador.");if(!existingCostCenter)Run(c,"INSERT INTO cost_centers(companyId,name) VALUES(@p0,@p1)",company,costCenter);
         var group=x.Installments>1 ? Guid.NewGuid().ToString("N") : null;
-        for(var i=0;i<x.Installments;i++) Run(c,"INSERT INTO titles(companyId,kind,description,amount,due,partyId,category,notes,installmentGroup,installmentNumber,installmentCount,interestRate,penaltyRate,discountRate,documentNumber,issueDate,branch,costCenter,paymentMethodId) VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7,@p8,@p9,@p10,@p11,@p12,@p13,@p14,@p15,@p16,@p17,@p18)",company,x.Kind,description+(x.Installments>1?$" ({i+1}/{x.Installments})":""),custom?x.InstallmentAmounts![i]:x.Amount/x.Installments+(i<x.Amount%x.Installments?1:0),(custom?customDues[i]:x.InstallmentIntervalDays==7?due.AddDays(i*7):due.AddMonths(i)).ToString("yyyy-MM-dd"),x.PartyId,planName,(x.Notes??"").ToUpperInvariant(),group,i+1,x.Installments,plan["interestRate"],plan["penaltyRate"],plan["discountRate"],document,issue,RequiredOrEmpty(x.Branch),costCenter,x.PaymentMethodId);
+        for(var i=0;i<x.Installments;i++) Run(c,"INSERT INTO titles(companyId,kind,description,amount,due,partyId,category,notes,installmentGroup,installmentNumber,installmentCount,interestRate,interestMode,interestValue,penaltyRate,penaltyMode,penaltyValue,discountRate,discountMode,discountValue,documentNumber,issueDate,branch,costCenter,paymentMethodId) VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7,@p8,@p9,@p10,@p11,@p12,@p13,@p14,@p15,@p16,@p17,@p18,@p19,@p20,@p21,@p22,@p23,@p24)",company,x.Kind,description+(x.Installments>1?$" ({i+1}/{x.Installments})":""),custom?x.InstallmentAmounts![i]:x.Amount/x.Installments+(i<x.Amount%x.Installments?1:0),(custom?customDues[i]:x.InstallmentIntervalDays==7?due.AddDays(i*7):due.AddMonths(i)).ToString("yyyy-MM-dd"),x.PartyId,planName,(x.Notes??"").ToUpperInvariant(),group,i+1,x.Installments,plan["interestRate"],plan["interestMode"],plan["interestValue"],plan["penaltyRate"],plan["penaltyMode"],plan["penaltyValue"],plan["discountRate"],plan["discountMode"],plan["discountValue"],document,issue,RequiredOrEmpty(x.Branch),costCenter,x.PaymentMethodId);
         Audit(c,company,"Lançamento",x);return new {ok=true};
     });
     long SettleCore(SqliteConnection c,int company,int id,SettlementInput x){
@@ -814,7 +881,7 @@ sealed class Ledger {
     });
     public object Duplicate(int company,int id,DuplicateInput x)=>Write(c=>{
         Existing(c,"titles",id,company);var t=Query(c,"SELECT * FROM titles WHERE id=@p0 AND deleted=0",id).SingleOrDefault()??throw new ArgumentException("Lançamento não encontrado.");var due=string.IsNullOrWhiteSpace(x.Due)?(string)t["due"]!:Date(x.Due).ToString("yyyy-MM-dd");var description=Regex.Replace((string)t["description"]!,@" \(\d+/\d+\)$","")+" - CÓPIA";
-        Run(c,"INSERT INTO titles(companyId,kind,description,amount,due,partyId,category,notes,installmentNumber,installmentCount,interestRate,penaltyRate,discountRate,issueDate,branch,costCenter,paymentMethodId) VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7,1,1,@p8,@p9,@p10,@p11,@p12,@p13,@p14)",company,t["kind"],description,t["amount"],due,t["partyId"],t["category"],t["notes"],t["interestRate"],t["penaltyRate"],t["discountRate"],t["issueDate"],t["branch"],t["costCenter"],t["paymentMethodId"]);var newId=Number(Query(c,"SELECT last_insert_rowid() AS id")[0],"id");Audit(c,company,"Duplicação",new{sourceId=id,titleId=newId,due});return new{ok=true,id=newId};
+        Run(c,"INSERT INTO titles(companyId,kind,description,amount,due,partyId,category,notes,installmentNumber,installmentCount,interestRate,interestMode,interestValue,penaltyRate,penaltyMode,penaltyValue,discountRate,discountMode,discountValue,issueDate,branch,costCenter,paymentMethodId) VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7,1,1,@p8,@p9,@p10,@p11,@p12,@p13,@p14,@p15,@p16,@p17,@p18,@p19,@p20)",company,t["kind"],description,t["amount"],due,t["partyId"],t["category"],t["notes"],t["interestRate"],t["interestMode"],t["interestValue"],t["penaltyRate"],t["penaltyMode"],t["penaltyValue"],t["discountRate"],t["discountMode"],t["discountValue"],t["issueDate"],t["branch"],t["costCenter"],t["paymentMethodId"]);var newId=Number(Query(c,"SELECT last_insert_rowid() AS id")[0],"id");Audit(c,company,"Duplicação",new{sourceId=id,titleId=newId,due});return new{ok=true,id=newId};
     });
     public object Reverse(int company,int id,ReasonInput x)=>Write(c=> {
         Existing(c,"settlements",id,company);var reason=Required(x.Reason,"Motivo");var s=Query(c,"SELECT * FROM settlements WHERE id=@p0",id)[0];
@@ -845,6 +912,9 @@ sealed class Ledger {
         var costCenter=RequiredOrEmpty(x.CostCenter);var existingCostCenter=costCenter.Length==0||Query(c,"SELECT id FROM cost_centers WHERE companyId=@p0 AND upper(name)=upper(@p1)",company,costCenter).Count>0;if(!existingCostCenter&&actor is not null&&IsFinancialUser(actor,company))throw new ArgumentException("Selecione um centro de custo já cadastrado pelo administrador.");if(!existingCostCenter)Run(c,"INSERT INTO cost_centers(companyId,name) VALUES(@p0,@p1)",company,costCenter);
         var all=Query(c,TitlesSql,company);var selected=all.SingleOrDefault(r=>Number(r,"id")==id)??throw new ArgumentException("Lançamento não encontrado.");
         if(Number(selected,"cancelled")!=0||Number(selected,"settled")!=0)throw new ArgumentException("Só é possível editar um lançamento sem baixa e que não esteja cancelado.");
+        var titleKind=(string)selected["kind"]!;var planName=string.IsNullOrWhiteSpace(x.Category)?(titleKind=="payable"?"DESPESAS GERAIS":"RECEITAS DE SERVIÇOS"):Required(x.Category,"Plano de contas");
+        var plan=Query(c,"SELECT * FROM plans WHERE companyId=@p0 AND kind=@p1 AND upper(name)=upper(@p2)",company,titleKind,planName).SingleOrDefault();
+        if(plan is null){Run(c,"INSERT INTO plans(companyId,name,kind) VALUES(@p0,@p1,@p2)",company,planName,titleKind);plan=Query(c,"SELECT * FROM plans WHERE id=last_insert_rowid()")[0];}
         var group=selected["installmentGroup"] as string;
         if(x.Scope=="all_open" && group is null)throw new ArgumentException("Este lançamento não possui parcelas vinculadas.");
         var targets=x.Scope=="all_open" ? all.Where(r=>(string?)r["installmentGroup"]==group && Number(r,"cancelled")==0 && Number(r,"settled")==0).ToList() : new(){selected};
@@ -852,7 +922,7 @@ sealed class Ledger {
         foreach(var target in targets) {
             var number=Convert.ToInt32(target["installmentNumber"]);var count=Convert.ToInt32(target["installmentCount"]);
             var label=description+(count>1?$" ({number}/{count})":"");var targetDue=due.AddMonths(number-selectedNumber).ToString("yyyy-MM-dd");
-            Run(c,"UPDATE titles SET description=@p0,amount=@p1,due=@p2,partyId=@p3,category=@p4,notes=@p5,documentNumber=@p6,issueDate=@p7,branch=@p8,costCenter=@p9,paymentMethodId=@p10 WHERE id=@p11",label,x.Amount,targetDue,x.PartyId,(x.Category??"").ToUpperInvariant(),(x.Notes??"").ToUpperInvariant(),RequiredOrEmpty(x.DocumentNumber),string.IsNullOrWhiteSpace(x.IssueDate)?"":Date(x.IssueDate).ToString("yyyy-MM-dd"),RequiredOrEmpty(x.Branch),costCenter,x.PaymentMethodId,Number(target,"id"));
+            Run(c,"UPDATE titles SET description=@p0,amount=@p1,due=@p2,partyId=@p3,category=@p4,notes=@p5,documentNumber=@p6,issueDate=@p7,branch=@p8,costCenter=@p9,paymentMethodId=@p10,interestRate=@p11,interestMode=@p12,interestValue=@p13,penaltyRate=@p14,penaltyMode=@p15,penaltyValue=@p16,discountRate=@p17,discountMode=@p18,discountValue=@p19 WHERE id=@p20",label,x.Amount,targetDue,x.PartyId,planName,(x.Notes??"").ToUpperInvariant(),RequiredOrEmpty(x.DocumentNumber),string.IsNullOrWhiteSpace(x.IssueDate)?"":Date(x.IssueDate).ToString("yyyy-MM-dd"),RequiredOrEmpty(x.Branch),costCenter,x.PaymentMethodId,plan["interestRate"],plan["interestMode"],plan["interestValue"],plan["penaltyRate"],plan["penaltyMode"],plan["penaltyValue"],plan["discountRate"],plan["discountMode"],plan["discountValue"],Number(target,"id"));
             Audit(c,company,"Edição",new {titleId=Number(target,"id"),description=label,amount=x.Amount,due=targetDue,scope=x.Scope});
         }
         return new {ok=true,editedCount=targets.Count};
@@ -890,8 +960,8 @@ sealed class Ledger {
         Run(c,"DELETE FROM movements; DELETE FROM settlements; DELETE FROM audit; DELETE FROM titles; DELETE FROM parties; DELETE FROM accounts; DELETE FROM plans; DELETE FROM user_companies; DELETE FROM companies;");
         Run(c,"INSERT INTO companies(id,name,cnpj) VALUES(1,'SUPERMERCADO MODELO MONALISA LTDA','12345678000195')");
         Run(c,"INSERT INTO accounts(id,companyId,name,opening) VALUES(1,1,'CAIXA LOJA',350000),(2,1,'BANCO ITAÚ',2500000),(3,1,'RECEBIMENTOS DE CARTÕES',0)");
-        void AddPlan(string name,decimal interest=0,decimal penalty=0,decimal discount=0)=>Run(c,"INSERT INTO plans(companyId,name,interestRate,penaltyRate,discountRate) VALUES(1,@p0,@p1,@p2,@p3)",name,interest,penalty,discount);
-        AddPlan("COMPRA DE MERCADORIAS",.1m,2m);AddPlan("HORTIFRÚTI",.1m,2m);AddPlan("AÇOUGUE",.1m,2m);AddPlan("PADARIA",.1m,2m);AddPlan("BEBIDAS",.1m,2m);AddPlan("MATERIAL DE LIMPEZA");AddPlan("ENERGIA ELÉTRICA");AddPlan("ALUGUEL");AddPlan("FOLHA DE PAGAMENTO");AddPlan("IMPOSTOS E TAXAS");AddPlan("MANUTENÇÃO");AddPlan("SEGURANÇA");AddPlan("FRETES");AddPlan("PERDAS E AVARIAS");AddPlan("TAXAS DE CARTÃO");AddPlan("VENDAS EM DINHEIRO");AddPlan("VENDAS POR PIX");AddPlan("CARTÃO DE DÉBITO");AddPlan("CARTÃO DE CRÉDITO");AddPlan("VALE-ALIMENTAÇÃO");AddPlan("CONVÊNIOS");
+        void AddPlan(string name,string kind="payable",decimal interest=0,decimal penalty=0,decimal discount=0)=>Run(c,"INSERT INTO plans(companyId,name,kind,interestRate,penaltyRate,discountRate) VALUES(1,@p0,@p1,@p2,@p3,@p4)",name,kind,interest,penalty,discount);
+        AddPlan("COMPRA DE MERCADORIAS",interest:.1m,penalty:2m);AddPlan("HORTIFRÚTI",interest:.1m,penalty:2m);AddPlan("AÇOUGUE",interest:.1m,penalty:2m);AddPlan("PADARIA",interest:.1m,penalty:2m);AddPlan("BEBIDAS",interest:.1m,penalty:2m);AddPlan("MATERIAL DE LIMPEZA");AddPlan("ENERGIA ELÉTRICA");AddPlan("ALUGUEL");AddPlan("FOLHA DE PAGAMENTO");AddPlan("IMPOSTOS E TAXAS");AddPlan("MANUTENÇÃO");AddPlan("SEGURANÇA");AddPlan("FRETES");AddPlan("PERDAS E AVARIAS");AddPlan("TAXAS DE CARTÃO");AddPlan("VENDAS EM DINHEIRO","receivable");AddPlan("VENDAS POR PIX","receivable");AddPlan("CARTÃO DE DÉBITO","receivable",discount:1.8m);AddPlan("CARTÃO DE CRÉDITO","receivable",discount:3.2m);AddPlan("VALE-ALIMENTAÇÃO","receivable");AddPlan("CONVÊNIOS","receivable");
         long AddParty(string name,string document,string type,string phone,string email){Run(c,"INSERT INTO parties(companyId,name,document,type,phone,email) VALUES(1,@p0,@p1,@p2,@p3,@p4)",name,document,type,phone,email);return Number(Query(c,"SELECT last_insert_rowid() AS id")[0],"id");}
         var atacado=AddParty("ATACADO BOM PREÇO LTDA","11222333000181","supplier","11940001001","FINANCEIRO@BOMPRECO.EXEMPLO");
         var frigorifico=AddParty("FRIGORÍFICO BOI FORTE LTDA","22333444000162","supplier","11940001002","COBRANCA@BOIFORTE.EXEMPLO");
@@ -903,7 +973,7 @@ sealed class Ledger {
         var convenio=AddParty("RESTAURANTE SABOR CASEIRO LTDA","88999000000158","customer","11940001006","FINANCEIRO@SABORCASEIRO.EXEMPLO");
         var today=DateOnly.FromDateTime(DateTime.Today);var first=new DateOnly(today.Year,today.Month,1);var next=first.AddMonths(1);
         long AddTitle(string kind,string description,long amount,DateOnly due,long? party,string plan,string document,DateOnly issue,string branch,string cost,string notes="",string? group=null,int number=1,int count=1){
-            Run(c,"INSERT INTO titles(companyId,kind,description,amount,due,partyId,category,notes,installmentGroup,installmentNumber,installmentCount,interestRate,penaltyRate,discountRate,documentNumber,issueDate,branch,costCenter) SELECT 1,@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7,@p8,@p9,interestRate,penaltyRate,discountRate,@p10,@p11,@p12,@p13 FROM plans WHERE companyId=1 AND name=@p5",kind,description,amount,due.ToString("yyyy-MM-dd"),party,plan,notes,group,number,count,document,issue.ToString("yyyy-MM-dd"),branch,cost);return Number(Query(c,"SELECT last_insert_rowid() AS id")[0],"id");
+            Run(c,"INSERT INTO titles(companyId,kind,description,amount,due,partyId,category,notes,installmentGroup,installmentNumber,installmentCount,interestRate,interestMode,interestValue,penaltyRate,penaltyMode,penaltyValue,discountRate,discountMode,discountValue,documentNumber,issueDate,branch,costCenter) SELECT 1,@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7,@p8,@p9,interestRate,interestMode,interestValue,penaltyRate,penaltyMode,penaltyValue,discountRate,discountMode,discountValue,@p10,@p11,@p12,@p13 FROM plans WHERE companyId=1 AND kind=@p0 AND name=@p5",kind,description,amount,due.ToString("yyyy-MM-dd"),party,plan,notes,group,number,count,document,issue.ToString("yyyy-MM-dd"),branch,cost);return Number(Query(c,"SELECT last_insert_rowid() AS id")[0],"id");
         }
         long Pay(long title,long account,long principal,DateOnly date,long interest=0,long penalty=0,long discount=0){
             Run(c,"INSERT INTO settlements(companyId,titleId,accountId,principal,interest,penalty,discount,date) VALUES(1,@p0,@p1,@p2,@p3,@p4,@p5,@p6)",title,account,principal,interest,penalty,discount,date.ToString("yyyy-MM-dd"));var id=Number(Query(c,"SELECT last_insert_rowid() AS id")[0],"id");var kind=(string)Query(c,"SELECT kind FROM titles WHERE id=@p0",title)[0]["kind"]!;var cash=principal+interest+penalty-discount;Run(c,"INSERT INTO movements(companyId,accountId,amount,date,description,settlementId) SELECT 1,@p0,@p1,@p2,description,@p3 FROM titles WHERE id=@p4",account,kind=="payable"?-cash:cash,date.ToString("yyyy-MM-dd"),id,title);return id;

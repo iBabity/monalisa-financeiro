@@ -48,6 +48,7 @@ Copy-Item -Path (Join-Path $windowsBundle '*') -Destination $publishRoot -Recurs
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'configure-network.ps1') -Destination (Join-Path $publishRoot 'Configurar-Rede-Financeira.ps1') -Force
 if ($Showcase) {
     Set-Content -LiteralPath (Join-Path $publishRoot 'showcase-edition.txt') -Value 'MONALISA FINANCEIRO - EDICAO DE DEMONSTRACAO' -Encoding ascii
+    Set-Content -LiteralPath (Join-Path $publishRoot 'no-login.txt') -Value 'ACESSO LOCAL AUTOMATICO' -Encoding ascii
 }
 
 if (-not (Test-Path -LiteralPath $redistCache)) {

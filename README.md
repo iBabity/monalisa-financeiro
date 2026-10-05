@@ -1,6 +1,6 @@
 # Monalisa Financeiro
 
-Versão atual: **1.1.16**.
+Versão atual: **1.1.17**.
 
 Aplicação independente para testar o ciclo financeiro com acesso por pessoa e empresa. Interface Flutter, API C#/.NET 10, SQLite. Identidade baseada na imagem fornecida e padrões de interface do Pedido de Compra. O projeto anterior não foi alterado; suas entidades de compras não são reutilizadas como entidades financeiras.
 

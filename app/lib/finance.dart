@@ -45,6 +45,24 @@ List<int> scheduledAmounts(int amount, int count, {bool repeatEach = false}) {
   );
 }
 
+bool repeatsEachTitle(String mode) =>
+    mode == 'monthly_repeat' || mode == 'weekly' || mode == 'custom';
+
+int generatedSeriesTotal(int amount, int count, String mode) =>
+    repeatsEachTitle(mode) ? amount * count : amount;
+
+Set<int> selectableTitleIds(Iterable<RecordData> titles) => titles
+    .where((title) => title['cancelled'] == 0 && title['remaining'] > 0)
+    .map<int>((title) => title['id'] as int)
+    .toSet();
+
+bool? selectAllState(Set<int> selectable, Set<int> selected) {
+  final selectedVisible = selectable.where(selected.contains).length;
+  if (selectedVisible == 0) return false;
+  if (selectedVisible == selectable.length) return true;
+  return null;
+}
+
 List<String> scheduledDues(String firstDue, int count, {int intervalDays = 0}) {
   if (count < 1 || intervalDays < 0 || intervalDays > 365) {
     throw const FormatException('Configuração de repetição inválida.');

@@ -421,8 +421,16 @@ class _EntryDialogState extends State<EntryDialog> {
         final amount = parseMoney(controllers['amount']!.text);
         if (repeatMode == 'single') return 'Uma conta de ${money(amount)}.';
         if (count < 1 || count > 120 || amount <= 0) return null;
-        if (repeatMode == 'weekly') {
-          return '$count lançamentos de ${money(amount)} a cada 7 dias. Total gerado: ${money(amount * count)}.';
+        if (repeatsEachTitle(repeatMode)) {
+          final interval = int.tryParse(
+            controllers['intervalDays']?.text ?? '',
+          );
+          final cadence = repeatMode == 'monthly_repeat'
+              ? 'todo mês'
+              : repeatMode == 'weekly'
+              ? 'a cada 7 dias'
+              : 'a cada ${interval ?? 0} dias';
+          return '$count lançamentos de ${money(amount)} $cadence. Total gerado: ${money(generatedSeriesTotal(amount, count, repeatMode))}.';
         }
         if (amount < count) return null;
         final base = amount ~/ count, remainder = amount % count;
