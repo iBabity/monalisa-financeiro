@@ -2,7 +2,7 @@
 
 Versão atual: **1.1.17**.
 
-Aplicação independente para testar o ciclo financeiro com acesso por pessoa e empresa. Interface Flutter, API C#/.NET 10, SQLite. Identidade baseada na imagem fornecida e padrões de interface do Pedido de Compra. O projeto anterior não foi alterado; suas entidades de compras não são reutilizadas como entidades financeiras.
+Aplicação independente para testar o ciclo financeiro com acesso por pessoa e empresa. Interface Flutter, API C#/.NET 10, SQLite. Identidade baseada na imagem fornecida e padrões do Monalisa Sistemas.
 
 Na tela **A pagar**, o botão **Baixar pelo OFX** importa extratos bancários, identifica débitos pelo `FITID`, sugere contas em aberto por valor, data, fornecedor e descrição e somente registra as baixas escolhidas pelo usuário. A primeira versão foi validada com OFX de conta corrente do Banco Itaú.
 
