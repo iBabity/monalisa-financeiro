@@ -1,6 +1,6 @@
 # Monalisa Financeiro
 
-Versão atual: **1.1.17**.
+Versão atual: **1.1.18**.
 
 Aplicação independente para testar o ciclo financeiro com acesso por pessoa e empresa. Interface Flutter, API C#/.NET 10, SQLite. Identidade baseada na imagem fornecida e padrões do Monalisa Sistemas.
 
@@ -55,7 +55,7 @@ Cada mutação financeira usa uma transação SQLite. As referências entre empr
 
 ## Testes
 
-`compilar.ps1` executa análise e testes Flutter, gera interface, compila C# e executa `test-api.ps1`. Os testes da API usam banco e porta exclusivos e cobrem baixa parcial, arredondamento das parcelas, fim do mês, saldo, estorno, cancelamento, transferências, isolamento e reabertura do backup.
+`quality-check.ps1` executa a compilação da API, análise estática e testes Flutter e todos os testes da API em bancos temporários. `compilar.ps1` também gera a interface usada pelo servidor. Os testes usam banco e porta exclusivos e cobrem baixa parcial, arredondamento das parcelas, fim do mês, saldo, estorno, cancelamento, transferências, isolamento e reabertura do backup.
 
 ## Próximas entregas
 

@@ -101,7 +101,30 @@ $escapedServerUrl = $LicenseServerUrl.Replace("'", "''")
 $installScript = [Regex]::Replace($installScript, "\[string\]\`$LicenseServerUrl = '[^']*'", "[string]`$LicenseServerUrl = '$escapedServerUrl'", 1)
 [IO.File]::WriteAllText((Join-Path $sourceRoot 'install.ps1'), $installScript, [Text.UTF8Encoding]::new($true))
 if (Test-Path -LiteralPath $setupPath) { Remove-Item -LiteralPath $setupPath -Force }
-& $csc /nologo /target:winexe /platform:anycpu "/out:$setupPath" "/win32icon:$projectRoot\app\windows\runner\resources\app_icon.ico" "/win32manifest:$PSScriptRoot\installer.manifest" /reference:System.Windows.Forms.dll /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll "/resource:$payloadZip,payload.zip" "/resource:$sourceRoot\payload.sha256,payload.sha256" "/resource:$sourceRoot\install.ps1,install.ps1" (Join-Path $PSScriptRoot 'bootstrapper.cs')
+
+$versionName = $BuildName
+if (-not $versionName) {
+    $pubspec = Get-Content -LiteralPath (Join-Path $projectRoot 'app\pubspec.yaml') -Raw
+    $versionMatch = [Regex]::Match($pubspec, '(?m)^version:\s*(\d+\.\d+\.\d+)')
+    if (-not $versionMatch.Success) { throw 'NÃO FOI POSSÍVEL IDENTIFICAR A VERSÃO DO APLICATIVO.' }
+    $versionName = $versionMatch.Groups[1].Value
+}
+if ($versionName -notmatch '^\d+\.\d+\.\d+$') { throw "VERSÃO INVÁLIDA PARA O INSTALADOR: $versionName" }
+$assemblyVersion = "$versionName.0"
+$productName = if ($Showcase) { 'Monalisa Financeiro Demonstração' } else { 'Monalisa Financeiro' }
+$assemblyInfo = @"
+using System.Reflection;
+[assembly: AssemblyTitle("$productName")]
+[assembly: AssemblyDescription("Instalador do $productName")]
+[assembly: AssemblyCompany("Monalisa Sistemas")]
+[assembly: AssemblyProduct("$productName")]
+[assembly: AssemblyVersion("$assemblyVersion")]
+[assembly: AssemblyFileVersion("$assemblyVersion")]
+"@
+$assemblyInfoPath = Join-Path $sourceRoot 'setup-assembly-info.cs'
+[IO.File]::WriteAllText($assemblyInfoPath, $assemblyInfo, [Text.UTF8Encoding]::new($true))
+
+& $csc /nologo /target:winexe /platform:anycpu "/out:$setupPath" "/win32icon:$projectRoot\app\windows\runner\resources\app_icon.ico" "/win32manifest:$PSScriptRoot\installer.manifest" /reference:System.Windows.Forms.dll /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll "/resource:$payloadZip,payload.zip" "/resource:$sourceRoot\payload.sha256,payload.sha256" "/resource:$sourceRoot\install.ps1,install.ps1" (Join-Path $PSScriptRoot 'bootstrapper.cs') $assemblyInfoPath
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $setupPath)) { throw 'NÃO FOI POSSÍVEL GERAR O INSTALADOR.' }
 
 $hash = (Get-FileHash -LiteralPath $setupPath -Algorithm SHA256).Hash

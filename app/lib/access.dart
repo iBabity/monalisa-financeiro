@@ -277,7 +277,10 @@ class _AccessGateState extends State<AccessGate> {
   Future<void> logout() async {
     try {
       await api.request('/auth/logout', {});
-    } catch (_) {}
+    } catch (error, stackTrace) {
+      debugPrint('Falha ao encerrar a sessão remota: $error');
+      debugPrintStack(stackTrace: stackTrace);
+    }
     if (!mounted) return;
     api.token = null;
     setState(() {

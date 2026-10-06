@@ -12,6 +12,7 @@ import 'access.dart';
 import 'browser_download.dart';
 import 'pdf_open.dart';
 import 'app_version.dart';
+import 'ui_components.dart';
 
 const teal = Color(0xFF073F43);
 const orange = Color(0xFFED791B);
@@ -71,40 +72,6 @@ class FinanceApp extends StatelessWidget {
         license: license,
         onLogout: logout,
       ),
-    ),
-  );
-}
-
-class _ReportFeature extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final String text;
-
-  const _ReportFeature({
-    required this.icon,
-    required this.title,
-    required this.text,
-  });
-
-  @override
-  Widget build(BuildContext context) => SizedBox(
-    width: 230,
-    child: Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Icon(icon, color: teal, size: 21),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(title, style: const TextStyle(fontWeight: FontWeight.w600)),
-              const SizedBox(height: 4),
-              Text(text, style: const TextStyle(fontSize: 12, height: 1.35)),
-            ],
-          ),
-        ),
-      ],
     ),
   );
 }
@@ -1333,17 +1300,17 @@ class _WorkspaceState extends State<Workspace> {
               spacing: 28,
               runSpacing: 12,
               children: [
-                _ReportFeature(
+                ReportFeature(
                   icon: Icons.assessment_outlined,
                   title: 'Resumo do período',
                   text: 'Recebido, pago, resultado e valores em aberto.',
                 ),
-                _ReportFeature(
+                ReportFeature(
                   icon: Icons.payments_outlined,
                   title: 'Baixas realizadas',
                   text: 'Pagamentos e recebimentos que movimentaram o caixa.',
                 ),
-                _ReportFeature(
+                ReportFeature(
                   icon: Icons.list_alt_outlined,
                   title: 'Lançamentos',
                   text: 'Contas do período com valor, saldo e situação.',
@@ -2771,15 +2738,15 @@ class _WorkspaceState extends State<Workspace> {
                       spacing: 16,
                       runSpacing: 8,
                       children: const [
-                        _MonitorLegend(
+                        MonitorLegend(
                           color: Color(0xFF2E8B67),
                           label: 'EM DIA',
                         ),
-                        _MonitorLegend(
+                        MonitorLegend(
                           color: Color(0xFFD28A20),
                           label: 'ATÉ 30 DIAS DE ATRASO',
                         ),
-                        _MonitorLegend(
+                        MonitorLegend(
                           color: Color(0xFFB54235),
                           label: 'MAIS DE 30 DIAS DE ATRASO',
                         ),
@@ -6359,31 +6326,4 @@ class _WorkspaceState extends State<Workspace> {
           : 'O lançamento sairá das listas e a exclusão ficará registrada no histórico. Se houve baixa, ela precisa estar estornada antes da exclusão.',
     );
   }
-}
-
-class _MonitorLegend extends StatelessWidget {
-  final Color color;
-  final String label;
-  const _MonitorLegend({required this.color, required this.label});
-
-  @override
-  Widget build(BuildContext context) => Row(
-    mainAxisSize: MainAxisSize.min,
-    children: [
-      Container(
-        width: 10,
-        height: 10,
-        decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-      ),
-      const SizedBox(width: 6),
-      Text(
-        label,
-        style: TextStyle(
-          color: Theme.of(context).colorScheme.onSurfaceVariant,
-          fontSize: 11,
-          fontWeight: FontWeight.w700,
-        ),
-      ),
-    ],
-  );
 }
