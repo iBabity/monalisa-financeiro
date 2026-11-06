@@ -99,6 +99,50 @@ try {
     Request "/companies/1/titles/$($fixedTitle.id)/settle" @{accountId=1;principal=10000;interest=275;penalty=0;discount=0;additional=0;date=$today} | Out-Null
     $afterFixed=@((Request '/companies/1/state').accounts | Where-Object id -eq 1)[0].balance
     Check (($beforeFixed-$afterFixed) -eq 10275) 'Juros fixos aumentam o pagamento'
+    $cardReference = (Get-Date).ToString('yyyy-MM')
+    $cardDue = (Get-Date -Day 10).AddMonths(1).ToString('yyyy-MM-dd')
+    $card = Request '/companies/1/credit-cards' @{name='Itau empresarial';lastFour='1234';closingDay=31;dueDay=10;accountId=1;notes='Cartao de compras'}
+    $purchase = Request "/companies/1/credit-cards/$($card.id)/purchases" @{description='Notebook';amount=30000;purchaseDate=$today;mode='installments';installments=3;category='Equipamentos';notes='Uso administrativo'}
+    $cardState = Request '/companies/1/state'
+    $invoices = @($cardState.creditCardInvoices | Where-Object cardId -eq $card.id | Sort-Object referenceMonth)
+    Check ($invoices.Count -eq 3 -and $invoices[0].referenceMonth -eq $cardReference -and $invoices[0].dueDate -eq $cardDue -and $invoices[0].amount -eq 10000) 'Compra parcelada gera uma fatura por mes com vencimento correto'
+    Check ($null -eq $invoices[0].titleId -and @($cardState.titles | Where-Object documentNumber -like "CARTAO-$($card.id)-*").Count -eq 0) 'Fatura aberta ainda não cria contas a pagar'
+    $extra = Request "/companies/1/credit-cards/$($card.id)/purchases" @{description='Material';amount=5000;purchaseDate=$today;installments=1;category='Material de limpeza';notes=''}
+    $cardState = Request '/companies/1/state'
+    $currentInvoice = @($cardState.creditCardInvoices | Where-Object { $_.cardId -eq $card.id -and $_.referenceMonth -eq $cardReference })[0]
+    Check ($currentInvoice.amount -eq 15000 -and @($cardState.creditCardPurchases | Where-Object invoiceId -eq $currentInvoice.id).Count -eq 2) 'Compras do mesmo ciclo são somadas na mesma fatura'
+    Request "/companies/1/credit-card-purchases/$($extra.purchaseGroup)/delete" @{reason='Exclusao de teste'} | Out-Null
+    $cardState = Request '/companies/1/state'
+    $currentInvoice = @($cardState.creditCardInvoices | Where-Object { $_.cardId -eq $card.id -and $_.referenceMonth -eq $cardReference })[0]
+    Check ($currentInvoice.amount -eq 10000) 'Exclusão da compra atualiza o total da fatura aberta'
+    $pastClosingDay = [Math]::Max(1, (Get-Date).Day - 1)
+    $afterClosingDate = if ((Get-Date).Day -eq 1) { (Get-Date).AddDays(1).ToString('yyyy-MM-dd') } else { $today }
+    $nextReference = (Get-Date -Day 1).AddMonths(1).ToString('yyyy-MM')
+    $cycleCard = Request '/companies/1/credit-cards' @{name='Cartao corte';lastFour='4321';closingDay=$pastClosingDay;dueDay=10;accountId=1;notes='Teste de corte'}
+    Request "/companies/1/credit-cards/$($cycleCard.id)/purchases" @{description='Compra depois do corte';amount=2500;purchaseDate=$afterClosingDate;installments=1;category='Equipamentos';notes=''} | Out-Null
+    $cycleState = Request '/companies/1/state'
+    Check (@($cycleState.creditCardInvoices | Where-Object { $_.cardId -eq $cycleCard.id -and $_.referenceMonth -eq $nextReference -and $_.amount -eq 2500 }).Count -eq 1) 'Compra após o fechamento entra na fatura do mês seguinte'
+    $recurringStart = $today
+    $recurring = Request "/companies/1/credit-cards/$($card.id)/purchases" @{description='Software mensal';amount=9900;purchaseDate=$recurringStart;mode='recurring';installments=1;category='Tecnologia';notes='Sem quantidade fixa de parcelas'}
+    $cardState = Request '/companies/1/state'
+    $recurringRows = @($cardState.creditCardPurchases | Where-Object recurringChargeId -eq $recurring.recurrenceId | Sort-Object referenceMonth)
+    Check ($recurring.generated -eq 2 -and $recurringRows.Count -eq 2 -and @($recurringRows | Where-Object amount -ne 9900).Count -eq 0) 'Cobranca recorrente ocupa somente a fatura atual e a proxima'
+    $farRecurring = @($cardState.creditCardPurchases | Where-Object { $null -ne $_.recurringChargeId -and $_.referenceMonth -gt $recurringRows[-1].referenceMonth })
+    Check ($farRecurring.Count -eq 0) 'Faturas futuras distantes existem somente quando ha parcelas reais'
+    $removedOccurrence = $recurringRows[-1]
+    Request "/companies/1/credit-card-purchases/$($removedOccurrence.purchaseGroup)/delete" @{reason='Nao cobrar neste mes'} | Out-Null
+    Request '/companies/1/credit-card-recurrences/refresh' @{} | Out-Null
+    $cardState = Request '/companies/1/state'
+    Check (@($cardState.creditCardPurchases | Where-Object { $_.recurringChargeId -eq $recurring.recurrenceId -and $_.referenceMonth -eq $removedOccurrence.referenceMonth }).Count -eq 0) 'Exclusao de uma ocorrencia recorrente nao recria o mes ignorado'
+    Request "/companies/1/credit-card-recurrences/$($recurring.recurrenceId)/stop" @{reason='Fim da assinatura'} | Out-Null
+    $cardState = Request '/companies/1/state'
+    $stopped = @($cardState.creditCardRecurringCharges | Where-Object id -eq $recurring.recurrenceId)[0]
+    Check ($stopped.active -eq 0 -and @($cardState.creditCardPurchases | Where-Object recurringChargeId -eq $recurring.recurrenceId).Count -eq 0) 'Encerramento remove previsoes futuras e preserva o historico fechado'
+    Request "/companies/1/credit-cards/$($card.id)/edit" @{name='Itau compras';lastFour='9876';closingDay=30;dueDay=18;accountId=1;notes='Cartao editado'} | Out-Null
+    $cardState = Request '/companies/1/state'
+    $editedCard = @($cardState.creditCards | Where-Object id -eq $card.id)[0]
+    Check ($editedCard.name -eq 'ITAU COMPRAS' -and $editedCard.lastFour -eq '9876' -and $editedCard.closingDay -eq 30 -and $editedCard.dueDay -eq 18) 'Nome e final do cartao podem ser editados'
+    Check (@($cardState.creditCardInvoices | Where-Object cardId -eq $card.id).Count -gt 0) 'Edição do cartão preserva suas faturas'
     $backup = Request '/backup' @{}
     Check (Test-Path -LiteralPath $backup.path) 'Backup SQLite criado'
     $before=Request '/companies/1/state'

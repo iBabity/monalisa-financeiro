@@ -40,12 +40,18 @@ try {
     if ($BuildNumber) { $flutterArguments += @('--build-number', $BuildNumber) }
     & $flutter @flutterArguments
     if ($LASTEXITCODE -ne 0) { throw 'A COMPILAÇÃO DO APLICATIVO WINDOWS FALHOU.' }
+    $webArguments = @('build', 'web', '--release')
+    if ($BuildName) { $webArguments += @('--build-name', $BuildName) }
+    if ($BuildNumber) { $webArguments += @('--build-number', $BuildNumber) }
+    & $flutter @webArguments
+    if ($LASTEXITCODE -ne 0) { throw 'A COMPILAÇÃO DO APLICATIVO PARA NAVEGADOR FALHOU.' }
 } finally { Pop-Location }
 
 $windowsBundle = Join-Path $projectRoot 'app\build\windows\x64\runner\Release'
 if (-not (Test-Path -LiteralPath (Join-Path $windowsBundle 'MonalisaFinanceiro.exe'))) { throw 'O EXECUTÁVEL WINDOWS NÃO FOI GERADO.' }
 Copy-Item -Path (Join-Path $windowsBundle '*') -Destination $publishRoot -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'configure-network.ps1') -Destination (Join-Path $publishRoot 'Configurar-Rede-Financeira.ps1') -Force
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'open-browser.ps1') -Destination (Join-Path $publishRoot 'Abrir-Monalisa-Financeiro.ps1') -Force
 if ($Showcase) {
     Set-Content -LiteralPath (Join-Path $publishRoot 'showcase-edition.txt') -Value 'MONALISA FINANCEIRO - EDICAO DE DEMONSTRACAO' -Encoding ascii
     Set-Content -LiteralPath (Join-Path $publishRoot 'no-login.txt') -Value 'ACESSO LOCAL AUTOMATICO' -Encoding ascii
@@ -72,6 +78,9 @@ if (Test-Path -LiteralPath $serverPublish) {
 New-Item -ItemType Directory -Path $serverPublish -Force | Out-Null
 & $dotnet publish (Join-Path $projectRoot 'api\Monalisa.Financeiro.csproj') -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o $serverPublish
 if ($LASTEXITCODE -ne 0) { throw 'A COMPILAÇÃO DO SERVIDOR LOCAL FALHOU.' }
+$webPublish = Join-Path $serverPublish 'wwwroot'
+New-Item -ItemType Directory -Path $webPublish -Force | Out-Null
+Copy-Item -Path (Join-Path $projectRoot 'app\build\web\*') -Destination $webPublish -Recurse -Force
 
 # Leitor portátil usado somente para recuperar backups PostgreSQL do Gestores.
 $postgresBin = 'C:\Program Files\PostgreSQL\12\bin'

@@ -107,6 +107,10 @@ class _WorkspaceState extends State<Workspace> {
       plans = [],
       paymentMethods = [],
       costCenters = [],
+      creditCards = [],
+      creditCardInvoices = [],
+      creditCardPurchases = [],
+      creditCardRecurringCharges = [],
       attachments = [],
       companyUsers = [],
       allUsers = [];
@@ -139,6 +143,7 @@ class _WorkspaceState extends State<Workspace> {
     'Histórico',
     'Relatórios',
     'Administração',
+    'Cartões de crédito',
   ];
   static const icons = [
     Icons.space_dashboard_outlined,
@@ -149,6 +154,7 @@ class _WorkspaceState extends State<Workspace> {
     Icons.history,
     Icons.picture_as_pdf_outlined,
     Icons.admin_panel_settings_outlined,
+    Icons.credit_card_outlined,
   ];
   bool get globalAdmin => widget.user['globalAdmin'] == true;
   String roleForCompany(int companyId) {
@@ -229,6 +235,12 @@ class _WorkspaceState extends State<Workspace> {
       final selected = cs.any((e) => e['id'] == company)
           ? company
           : cs.first['id'] as int;
+      if (currentLicense['status'] == 'active') {
+        await api.request(
+          '/companies/$selected/credit-card-recurrences/refresh',
+          {},
+        );
+      }
       final data = await api.request('/companies/$selected/state');
       if (!mounted || request != generation) return;
       setState(() {
@@ -245,6 +257,12 @@ class _WorkspaceState extends State<Workspace> {
         plans = rows(data['plans']);
         paymentMethods = rows(data['paymentMethods'] ?? []);
         costCenters = rows(data['costCenters'] ?? []);
+        creditCards = rows(data['creditCards'] ?? []);
+        creditCardInvoices = rows(data['creditCardInvoices'] ?? []);
+        creditCardPurchases = rows(data['creditCardPurchases'] ?? []);
+        creditCardRecurringCharges = rows(
+          data['creditCardRecurringCharges'] ?? [],
+        );
         attachments = rows(data['attachments'] ?? []);
         permissions = RecordData.from(data['permissions'] ?? const {});
         selectedTitleIds.clear();
@@ -268,6 +286,112 @@ class _WorkspaceState extends State<Workspace> {
     } catch (e) {
       if (mounted) message(e.toString().replaceFirst('Exception: ', ''));
     }
+  }
+
+  Future<void> showInstallInstructions() async {
+    var mobileUrl = '';
+    try {
+      final access = await api.request('/health/mobile-access');
+      if (access['enabled'] == true) mobileUrl = '${access['url'] ?? ''}';
+    } catch (_) {}
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        icon: const Icon(Icons.install_desktop, color: teal, size: 42),
+        title: const Text('Instale o Monalisa'),
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 560),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'O sistema ficará com ícone próprio e abrirá em uma janela, como um aplicativo instalado.',
+                ),
+                const SizedBox(height: 20),
+                const Text(
+                  'NO COMPUTADOR • GOOGLE CHROME',
+                  style: TextStyle(fontWeight: FontWeight.w800),
+                ),
+                const SizedBox(height: 8),
+                const Text('1. Abra o menu de três pontos ⋮ do Chrome.'),
+                const Text('2. Entre em “Transmitir, salvar e compartilhar”.'),
+                const Text('3. Clique em “Instalar esta página como um app”.'),
+                const Text('4. Confirme em “Instalar”.'),
+                const SizedBox(height: 12),
+                const Text(
+                  'O ícone de instalação também pode aparecer à direita da barra de endereço.',
+                ),
+                const SizedBox(height: 20),
+                const Text(
+                  'MICROSOFT EDGE',
+                  style: TextStyle(fontWeight: FontWeight.w800),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Abra o menu ⋯, escolha “Aplicativos” e depois “Instalar Monalisa Financeiro”.',
+                ),
+                const SizedBox(height: 20),
+                const Text(
+                  'CELULAR',
+                  style: TextStyle(fontWeight: FontWeight.w800),
+                ),
+                const SizedBox(height: 8),
+                if (mobileUrl.isNotEmpty) ...[
+                  const Text('Conecte o celular à mesma rede Wi-Fi e abra:'),
+                  const SizedBox(height: 8),
+                  SelectableText(
+                    mobileUrl,
+                    style: const TextStyle(
+                      color: teal,
+                      fontWeight: FontWeight.w800,
+                      fontSize: 17,
+                    ),
+                  ),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: TextButton.icon(
+                      onPressed: () async {
+                        await Clipboard.setData(ClipboardData(text: mobileUrl));
+                        if (dialogContext.mounted) {
+                          ScaffoldMessenger.of(dialogContext).showSnackBar(
+                            const SnackBar(content: Text('Endereço copiado.')),
+                          );
+                        }
+                      },
+                      icon: const Icon(Icons.copy),
+                      label: const Text('Copiar endereço'),
+                    ),
+                  ),
+                ] else
+                  const Text(
+                    'O acesso pelo celular ainda não está liberado nesta máquina.',
+                  ),
+                const Text(
+                  'Android • Chrome: menu ⋮ → Instalar aplicativo ou Adicionar à tela inicial.',
+                ),
+                const Text(
+                  'iPhone • Safari: Compartilhar → Adicionar à Tela de Início.',
+                ),
+                const SizedBox(height: 20),
+                const Text(
+                  'Nesta edição de teste, os dados continuam salvos neste computador. O serviço do Monalisa iniciará automaticamente com o Windows.',
+                  style: TextStyle(color: teal, fontWeight: FontWeight.w600),
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Entendi'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> loadAdminData() async {
@@ -296,6 +420,229 @@ class _WorkspaceState extends State<Workspace> {
       list.fold<num>(0, (sum, e) => sum + (e[field] as num));
   Iterable<RecordData> get open =>
       titles.where((t) => t['cancelled'] == 0 && t['remaining'] > 0);
+
+  void selectPage(int targetPage, {bool closeDrawer = false}) {
+    setState(() {
+      page = targetPage;
+      search = '';
+      selectedTitleIds.clear();
+      filter = targetPage == 1 || targetPage == 2 ? 'Em aberto' : 'Todos';
+      if (targetPage == 1 || targetPage == 2) {
+        selectedMonth = iso(DateTime.now()).substring(0, 7);
+      }
+    });
+    if (targetPage == 7) loadAdminData();
+    if (closeDrawer) Navigator.of(context).maybePop();
+  }
+
+  void selectCompany(int value) {
+    setState(() {
+      company = value;
+      if (roleForCompany(value) == 'user' && !pageAllowed(page)) page = 0;
+    });
+    load().then((_) {
+      if (page == 7) loadAdminData();
+    });
+  }
+
+  Widget navigationSidebar({bool drawerMode = false}) => SizedBox(
+    width: drawerMode ? 280 : 224,
+    child: ColoredBox(
+      color: teal,
+      child: SafeArea(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(25, 24, 20, 5),
+              child: Text(
+                'monalisa',
+                style: TextStyle(
+                  fontSize: 32,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: -1.5,
+                  color: Colors.white,
+                ),
+              ),
+            ),
+            const Padding(
+              padding: EdgeInsets.fromLTRB(27, 0, 20, 22),
+              child: Text(
+                'F I N A N C E I R O',
+                style: TextStyle(
+                  color: Color(0xFFFFBE67),
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            if (drawerMode && companies.length > 1)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(18, 0, 18, 12),
+                child: DropdownButtonFormField<int>(
+                  initialValue: company,
+                  dropdownColor: teal,
+                  iconEnabledColor: Colors.white,
+                  style: const TextStyle(color: Colors.white, fontSize: 13),
+                  decoration: InputDecoration(
+                    labelText: 'EMPRESA',
+                    labelStyle: const TextStyle(color: Colors.white70),
+                    filled: true,
+                    fillColor: Colors.white.withValues(alpha: .08),
+                    border: const OutlineInputBorder(),
+                  ),
+                  items: companies
+                      .map(
+                        (item) => DropdownMenuItem<int>(
+                          value: item['id'],
+                          child: Text(
+                            '${item['name']}',
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      )
+                      .toList(),
+                  onChanged: loading
+                      ? null
+                      : (value) {
+                          if (value != null) selectCompany(value);
+                        },
+                ),
+              ),
+            Expanded(
+              child: ListView(
+                padding: EdgeInsets.zero,
+                children: [
+                  for (int i = 0; i < labels.length; i++)
+                    if (pageAllowed(i) && (i != 7 || canManageAccess))
+                      Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 3,
+                        ),
+                        child: ListTile(
+                          dense: true,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          selected: page == i,
+                          selectedTileColor: const Color(0xFF226064),
+                          leading: Icon(
+                            icons[i],
+                            size: 21,
+                            color: page == i
+                                ? const Color(0xFFFFB651)
+                                : Colors.white60,
+                          ),
+                          title: Text(
+                            labels[i],
+                            style: TextStyle(
+                              color: page == i ? Colors.white : Colors.white70,
+                              fontSize: 14,
+                              fontWeight: page == i
+                                  ? FontWeight.w600
+                                  : FontWeight.normal,
+                            ),
+                          ),
+                          onTap: () => selectPage(i, closeDrawer: drawerMode),
+                        ),
+                      ),
+                  if (kIsWeb)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(18, 10, 18, 4),
+                      child: OutlinedButton.icon(
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: Colors.white,
+                          side: BorderSide(
+                            color: Colors.white.withValues(alpha: .28),
+                          ),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 13,
+                          ),
+                        ),
+                        onPressed: showInstallInstructions,
+                        icon: const Icon(Icons.install_desktop, size: 18),
+                        label: const Text('Instalar aplicativo'),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(18, 8, 18, 18),
+              child: Container(
+                padding: const EdgeInsets.all(13),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: .07),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(Icons.circle, size: 7, color: Color(0xFFBFD4AF)),
+                        SizedBox(width: 8),
+                        Text(
+                          'Ambiente de teste',
+                          style: TextStyle(color: Colors.white, fontSize: 12),
+                        ),
+                      ],
+                    ),
+                    SizedBox(height: 5),
+                    Text(
+                      'Dados salvos nesta máquina',
+                      style: TextStyle(color: Colors.white54, fontSize: 11),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+
+  PreferredSizeWidget mobileAppBar() => AppBar(
+    toolbarHeight: 68,
+    backgroundColor: darkMode ? const Color(0xFF1E1E1E) : Colors.white,
+    foregroundColor: darkMode ? Colors.white : teal,
+    titleSpacing: 4,
+    title: Row(
+      children: [
+        const Icon(Icons.business_outlined, size: 20),
+        const SizedBox(width: 9),
+        Expanded(
+          child: Text(
+            companies.isEmpty
+                ? 'MONALISA FINANCEIRO'
+                : '${companies.firstWhere((item) => item['id'] == company, orElse: () => companies.first)['name']}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+          ),
+        ),
+      ],
+    ),
+    actions: [
+      IconButton(
+        tooltip: darkMode ? 'Usar modo claro' : 'Usar modo escuro',
+        onPressed: () => setState(() => darkMode = !darkMode),
+        icon: Icon(
+          darkMode ? Icons.light_mode_outlined : Icons.dark_mode_outlined,
+          size: 20,
+        ),
+      ),
+      IconButton(
+        tooltip: 'Atualizar',
+        onPressed: loading ? null : load,
+        icon: const Icon(Icons.refresh, size: 21),
+      ),
+    ],
+  );
+
   @override
   Widget build(BuildContext context) => Theme(
     data: darkMode
@@ -325,331 +672,208 @@ class _WorkspaceState extends State<Workspace> {
         child: Focus(
           autofocus: true,
           child: Scaffold(
+            drawer: MediaQuery.sizeOf(context).width < 760
+                ? Drawer(width: 280, child: navigationSidebar(drawerMode: true))
+                : null,
+            appBar: MediaQuery.sizeOf(context).width < 760
+                ? mobileAppBar()
+                : null,
             body: Row(
               children: [
-                SizedBox(
-                  width: 224,
-                  child: ColoredBox(
-                    color: teal,
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        const Padding(
-                          padding: EdgeInsets.fromLTRB(25, 33, 20, 5),
-                          child: Text(
-                            'monalisa',
-                            style: TextStyle(
-                              fontSize: 32,
-                              fontWeight: FontWeight.w800,
-                              letterSpacing: -1.5,
-                              color: Colors.white,
-                            ),
-                          ),
-                        ),
-                        const Padding(
-                          padding: EdgeInsets.fromLTRB(27, 0, 20, 36),
-                          child: Text(
-                            'F I N A N C E I R O',
-                            style: TextStyle(
-                              color: Color(0xFFFFBE67),
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                        for (int i = 0; i < labels.length; i++)
-                          if (pageAllowed(i) && (i != 7 || canManageAccess))
-                            Padding(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 12,
-                                vertical: 4,
-                              ),
-                              child: ListTile(
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                ),
-                                selected: page == i,
-                                selectedTileColor: const Color(0xFF226064),
-                                leading: Icon(
-                                  icons[i],
-                                  size: 21,
-                                  color: page == i
-                                      ? const Color(0xFFFFB651)
-                                      : Colors.white60,
-                                ),
-                                title: Text(
-                                  labels[i],
-                                  style: TextStyle(
-                                    color: page == i
-                                        ? Colors.white
-                                        : Colors.white70,
-                                    fontSize: 14,
-                                    fontWeight: page == i
-                                        ? FontWeight.w600
-                                        : FontWeight.normal,
-                                  ),
-                                ),
-                                onTap: () {
-                                  setState(() {
-                                    page = i;
-                                    search = '';
-                                    selectedTitleIds.clear();
-                                    filter = i == 1 || i == 2
-                                        ? 'Em aberto'
-                                        : 'Todos';
-                                    if (i == 1 || i == 2) {
-                                      selectedMonth = iso(DateTime.now())
-                                          .substring(0, 7);
-                                    }
-                                  });
-                                  if (i == 7) loadAdminData();
-                                },
-                              ),
-                            ),
-                        const Spacer(),
-                        Padding(
-                          padding: const EdgeInsets.all(20),
-                          child: Container(
-                            padding: const EdgeInsets.all(14),
-                            decoration: BoxDecoration(
-                              color: Colors.white.withValues(alpha: .07),
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: const Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Row(
-                                  children: [
-                                    Icon(
-                                      Icons.circle,
-                                      size: 7,
-                                      color: Color(0xFFBFD4AF),
-                                    ),
-                                    SizedBox(width: 8),
-                                    Text(
-                                      'Ambiente de teste',
-                                      style: TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 12,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                                SizedBox(height: 6),
-                                Text(
-                                  'Dados salvos nesta máquina',
-                                  style: TextStyle(
-                                    color: Colors.white54,
-                                    fontSize: 11,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
+                if (MediaQuery.sizeOf(context).width >= 760)
+                  navigationSidebar(),
                 Expanded(
                   child: Column(
                     children: [
-                      Container(
-                        height: 82,
-                        padding: const EdgeInsets.symmetric(horizontal: 30),
-                        decoration: BoxDecoration(
-                          color: darkMode
-                              ? const Color(0xFF1E1E1E)
-                              : Colors.white,
-                          border: const Border(
-                            bottom: BorderSide(color: Color(0xFFE7E5DD)),
-                          ),
-                        ),
-                        child: Row(
-                          children: [
-                            const Icon(
-                              Icons.business_outlined,
-                              color: teal,
-                              size: 21,
+                      if (MediaQuery.sizeOf(context).width >= 760)
+                        Container(
+                          height: 82,
+                          padding: const EdgeInsets.symmetric(horizontal: 30),
+                          decoration: BoxDecoration(
+                            color: darkMode
+                                ? const Color(0xFF1E1E1E)
+                                : Colors.white,
+                            border: const Border(
+                              bottom: BorderSide(color: Color(0xFFE7E5DD)),
                             ),
-                            const SizedBox(width: 12),
-                            if (companies.length == 1)
-                              Text(
-                                '${companies.first['name']}',
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.w600,
-                                  fontSize: 14,
-                                ),
-                              )
-                            else if (companies.length > 1)
-                              SizedBox(
-                                width: 245,
-                                child: DropdownButtonHideUnderline(
-                                  child: DropdownButton<int>(
-                                    isExpanded: true,
-                                    value: company,
-                                    items: companies
-                                        .map(
-                                          (c) => DropdownMenuItem<int>(
-                                            value: c['id'],
-                                            child: Text(
-                                              c['name'],
-                                              overflow: TextOverflow.ellipsis,
-                                              style: const TextStyle(
-                                                fontWeight: FontWeight.w600,
-                                                fontSize: 14,
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(
+                                Icons.business_outlined,
+                                color: teal,
+                                size: 21,
+                              ),
+                              const SizedBox(width: 12),
+                              if (companies.length == 1)
+                                Text(
+                                  '${companies.first['name']}',
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 14,
+                                  ),
+                                )
+                              else if (companies.length > 1)
+                                SizedBox(
+                                  width: 245,
+                                  child: DropdownButtonHideUnderline(
+                                    child: DropdownButton<int>(
+                                      isExpanded: true,
+                                      value: company,
+                                      items: companies
+                                          .map(
+                                            (c) => DropdownMenuItem<int>(
+                                              value: c['id'],
+                                              child: Text(
+                                                c['name'],
+                                                overflow: TextOverflow.ellipsis,
+                                                style: const TextStyle(
+                                                  fontWeight: FontWeight.w600,
+                                                  fontSize: 14,
+                                                ),
                                               ),
                                             ),
-                                          ),
-                                        )
-                                        .toList(),
-                                    onChanged: loading
-                                        ? null
-                                        : (v) {
-                                            if (v != null) {
-                                              setState(() {
-                                                company = v;
-                                                if (roleForCompany(v) ==
-                                                        'user' &&
-                                                    !pageAllowed(page)) {
-                                                  page = 0;
-                                                }
-                                              });
-                                              load().then((_) {
-                                                if (page == 7) loadAdminData();
-                                              });
-                                            }
-                                          },
+                                          )
+                                          .toList(),
+                                      onChanged: loading
+                                          ? null
+                                          : (v) {
+                                              if (v != null) {
+                                                selectCompany(v);
+                                              }
+                                            },
+                                    ),
                                   ),
+                                ),
+                              if (license['showcase'] == true) ...[
+                                const SizedBox(width: 14),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 10,
+                                    vertical: 5,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: orange.withValues(alpha: .12),
+                                    borderRadius: BorderRadius.circular(20),
+                                    border: Border.all(
+                                      color: orange.withValues(alpha: .35),
+                                    ),
+                                  ),
+                                  child: const Text(
+                                    'DEMONSTRAÇÃO',
+                                    style: TextStyle(
+                                      color: orange,
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.w800,
+                                      letterSpacing: .5,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                              const Spacer(),
+                              IconButton(
+                                tooltip: 'Diminuir letras',
+                                onPressed: fontScale <= .9
+                                    ? null
+                                    : () => setState(
+                                        () => fontScale = (fontScale - .1)
+                                            .clamp(.9, 1.4),
+                                      ),
+                                icon: const Icon(Icons.text_decrease, size: 20),
+                              ),
+                              Text(
+                                '${(fontScale * 100).round()}%',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: mutedText,
                                 ),
                               ),
-                            if (license['showcase'] == true) ...[
-                              const SizedBox(width: 14),
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 10,
-                                  vertical: 5,
+                              IconButton(
+                                tooltip: 'Aumentar letras',
+                                onPressed: fontScale >= 1.4
+                                    ? null
+                                    : () => setState(
+                                        () => fontScale = (fontScale + .1)
+                                            .clamp(.9, 1.4),
+                                      ),
+                                icon: const Icon(Icons.text_increase, size: 20),
+                              ),
+                              IconButton(
+                                tooltip: darkMode
+                                    ? 'Usar modo claro'
+                                    : 'Usar modo escuro',
+                                onPressed: () =>
+                                    setState(() => darkMode = !darkMode),
+                                icon: Icon(
+                                  darkMode
+                                      ? Icons.light_mode_outlined
+                                      : Icons.dark_mode_outlined,
+                                  size: 20,
                                 ),
-                                decoration: BoxDecoration(
-                                  color: orange.withValues(alpha: .12),
-                                  borderRadius: BorderRadius.circular(20),
-                                  border: Border.all(
-                                    color: orange.withValues(alpha: .35),
+                              ),
+                              Text(
+                                dateLabel(iso(DateTime.now())),
+                                style: TextStyle(
+                                  color: mutedText,
+                                  fontSize: 12,
+                                ),
+                              ),
+                              const SizedBox(width: 16),
+                              IconButton(
+                                tooltip: 'Atualizar',
+                                onPressed: loading ? null : load,
+                                icon: const Icon(Icons.refresh, size: 21),
+                              ),
+                              PopupMenuButton<String>(
+                                tooltip: 'USUÁRIO CONECTADO',
+                                onSelected: (value) {
+                                  if (value == 'logout') widget.onLogout();
+                                },
+                                itemBuilder: (_) => [
+                                  PopupMenuItem<String>(
+                                    enabled: false,
+                                    child: Text(
+                                      '${widget.user['name']}\n${globalAdmin
+                                          ? 'ADMINISTRADOR GERAL'
+                                          : financialUser
+                                          ? 'USUÁRIO FINANCEIRO'
+                                          : 'ADMINISTRADOR DA EMPRESA'}',
+                                    ),
                                   ),
-                                ),
-                                child: const Text(
-                                  'DEMONSTRAÇÃO',
-                                  style: TextStyle(
-                                    color: orange,
-                                    fontSize: 10,
-                                    fontWeight: FontWeight.w800,
-                                    letterSpacing: .5,
+                                  const PopupMenuDivider(),
+                                  const PopupMenuItem<String>(
+                                    value: 'logout',
+                                    child: ListTile(
+                                      contentPadding: EdgeInsets.zero,
+                                      leading: Icon(Icons.logout),
+                                      title: Text('SAIR'),
+                                    ),
+                                  ),
+                                ],
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 10,
+                                    vertical: 8,
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      const Icon(Icons.account_circle_outlined),
+                                      const SizedBox(width: 7),
+                                      Text(
+                                        widget.user['username'],
+                                        style: const TextStyle(
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                 ),
                               ),
                             ],
-                            const Spacer(),
-                            IconButton(
-                              tooltip: 'Diminuir letras',
-                              onPressed: fontScale <= .9
-                                  ? null
-                                  : () => setState(
-                                      () => fontScale = (fontScale - .1).clamp(
-                                        .9,
-                                        1.4,
-                                      ),
-                                    ),
-                              icon: const Icon(Icons.text_decrease, size: 20),
-                            ),
-                            Text(
-                              '${(fontScale * 100).round()}%',
-                              style: TextStyle(fontSize: 11, color: mutedText),
-                            ),
-                            IconButton(
-                              tooltip: 'Aumentar letras',
-                              onPressed: fontScale >= 1.4
-                                  ? null
-                                  : () => setState(
-                                      () => fontScale = (fontScale + .1).clamp(
-                                        .9,
-                                        1.4,
-                                      ),
-                                    ),
-                              icon: const Icon(Icons.text_increase, size: 20),
-                            ),
-                            IconButton(
-                              tooltip: darkMode
-                                  ? 'Usar modo claro'
-                                  : 'Usar modo escuro',
-                              onPressed: () =>
-                                  setState(() => darkMode = !darkMode),
-                              icon: Icon(
-                                darkMode
-                                    ? Icons.light_mode_outlined
-                                    : Icons.dark_mode_outlined,
-                                size: 20,
-                              ),
-                            ),
-                            Text(
-                              dateLabel(iso(DateTime.now())),
-                              style: TextStyle(color: mutedText, fontSize: 12),
-                            ),
-                            const SizedBox(width: 16),
-                            IconButton(
-                              tooltip: 'Atualizar',
-                              onPressed: loading ? null : load,
-                              icon: const Icon(Icons.refresh, size: 21),
-                            ),
-                            PopupMenuButton<String>(
-                              tooltip: 'USUÁRIO CONECTADO',
-                              onSelected: (value) {
-                                if (value == 'logout') widget.onLogout();
-                              },
-                              itemBuilder: (_) => [
-                                PopupMenuItem<String>(
-                                  enabled: false,
-                                  child: Text(
-                                    '${widget.user['name']}\n${globalAdmin
-                                        ? 'ADMINISTRADOR GERAL'
-                                        : financialUser
-                                        ? 'USUÁRIO FINANCEIRO'
-                                        : 'ADMINISTRADOR DA EMPRESA'}',
-                                  ),
-                                ),
-                                const PopupMenuDivider(),
-                                const PopupMenuItem<String>(
-                                  value: 'logout',
-                                  child: ListTile(
-                                    contentPadding: EdgeInsets.zero,
-                                    leading: Icon(Icons.logout),
-                                    title: Text('SAIR'),
-                                  ),
-                                ),
-                              ],
-                              child: Padding(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 10,
-                                  vertical: 8,
-                                ),
-                                child: Row(
-                                  children: [
-                                    const Icon(Icons.account_circle_outlined),
-                                    const SizedBox(width: 7),
-                                    Text(
-                                      widget.user['username'],
-                                      style: const TextStyle(
-                                        fontSize: 12,
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                          ],
+                          ),
                         ),
-                      ),
                       if (license['status'] == 'warning' ||
                           license['status'] == 'read_only')
                         Container(
@@ -709,7 +933,11 @@ class _WorkspaceState extends State<Workspace> {
                                 ),
                               )
                             : SingleChildScrollView(
-                                padding: const EdgeInsets.all(30),
+                                padding: EdgeInsets.all(
+                                  MediaQuery.sizeOf(context).width < 760
+                                      ? 16
+                                      : 30,
+                                ),
                                 child: Column(
                                   crossAxisAlignment:
                                       CrossAxisAlignment.stretch,
@@ -722,7 +950,13 @@ class _WorkspaceState extends State<Workspace> {
                                       runSpacing: 16,
                                       children: [
                                         SizedBox(
-                                          width: 330,
+                                          width:
+                                              MediaQuery.sizeOf(context).width <
+                                                  760
+                                              ? MediaQuery.sizeOf(context)
+                                                        .width -
+                                                    32
+                                              : 330,
                                           child: Column(
                                             crossAxisAlignment:
                                                 CrossAxisAlignment.start,
@@ -747,6 +981,7 @@ class _WorkspaceState extends State<Workspace> {
                                                   'Rastreabilidade das operações da empresa.',
                                                   'Documentos claros para conferir, salvar e compartilhar.',
                                                   'Empresas, lojas e pessoas autorizadas a acessar o sistema.',
+                                                  'Compras detalhadas e faturas reunidas no Contas a Pagar.',
                                                 ][page],
                                                 style: TextStyle(
                                                   color: mutedText,
@@ -841,6 +1076,47 @@ class _WorkspaceState extends State<Workspace> {
                                                     'Monitoramento',
                                                   ),
                                                 ),
+                                              if (page == 1)
+                                                FilledButton.icon(
+                                                  onPressed: () =>
+                                                      setState(() => page = 8),
+                                                  icon: const Icon(
+                                                    Icons.credit_card_outlined,
+                                                    size: 19,
+                                                  ),
+                                                  label: const Text(
+                                                    'Cartões de crédito',
+                                                  ),
+                                                ),
+                                            ],
+                                          )
+                                        else if (page == 8)
+                                          Wrap(
+                                            spacing: 10,
+                                            runSpacing: 10,
+                                            children: [
+                                              FilledButton.icon(
+                                                onPressed: creditCardForm,
+                                                icon: const Icon(
+                                                  Icons.add_card_outlined,
+                                                  size: 19,
+                                                ),
+                                                label: const Text(
+                                                  'Novo cartão',
+                                                ),
+                                              ),
+                                              if (creditCards.isNotEmpty)
+                                                FilledButton.icon(
+                                                  onPressed:
+                                                      creditCardPurchaseForm,
+                                                  icon: const Icon(
+                                                    Icons.add_shopping_cart,
+                                                    size: 19,
+                                                  ),
+                                                  label: const Text(
+                                                    'Nova compra',
+                                                  ),
+                                                ),
                                             ],
                                           ),
                                       ],
@@ -856,9 +1132,10 @@ class _WorkspaceState extends State<Workspace> {
                                     if (page == 6) ...reportsPage(),
                                     if (page == 7 && canManageAccess)
                                       ...adminPage(),
+                                    if (page == 8) ...creditCardsPage(),
                                     const SizedBox(height: 25),
                                     Text(
-                                      'MONALISA SISTEMAS  /  FINANCEIRO WINDOWS • VERSÃO $appVersion',
+                                      'MONALISA SISTEMAS  /  ${kIsWeb ? 'FINANCEIRO WEB' : 'FINANCEIRO WINDOWS'} • VERSÃO $appVersion',
                                       style: TextStyle(
                                         color: faintText,
                                         fontSize: 10,
@@ -869,14 +1146,26 @@ class _WorkspaceState extends State<Workspace> {
                                 ),
                               ),
                       ),
-                      if (page == 1)
-                        FilledButton.icon(
-                          onPressed: importOfxPayables,
-                          icon: const Icon(
-                            Icons.upload_file_outlined,
-                            size: 19,
-                          ),
-                          label: const Text('Baixar pelo OFX'),
+                      if (page == 1 || page == 2)
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          alignment: WrapAlignment.end,
+                          children: [
+                            FilledButton.icon(
+                              onPressed: openFinanceSandbox,
+                              icon: const Icon(Icons.account_balance_outlined),
+                              label: const Text('OPEN FINANCE — TESTE'),
+                            ),
+                            FilledButton.icon(
+                              onPressed: importOfxPayables,
+                              icon: const Icon(
+                                Icons.upload_file_outlined,
+                                size: 19,
+                              ),
+                              label: const Text('CONCILIAR EXTRATO OFX'),
+                            ),
+                          ],
                         ),
                     ],
                   ),
@@ -4654,321 +4943,393 @@ class _WorkspaceState extends State<Workspace> {
     return result;
   }
 
-  Future<void> importOfxPayables() async {
-    final availableAccounts = accounts.toList();
-    if (availableAccounts.isEmpty) {
-      message('Cadastre primeiro a conta financeira ITAU como conta bancária.');
-      return;
-    }
-    final file = await openFile(
-      acceptedTypeGroups: const [
-        XTypeGroup(label: 'Extrato bancário OFX', extensions: ['ofx']),
-      ],
-    );
-    if (file == null || !mounted) return;
-    var accountId =
-        (availableAccounts.firstWhere(
-                  (account) =>
-                      '${account['name']}'.toUpperCase().startsWith('ITA'),
-                  orElse: () => availableAccounts.first,
-                )['id']
-                as num)
-            .toInt();
-    if (availableAccounts.length > 1) {
-      final selectedAccount = await showDialog<int>(
-        context: context,
-        builder: (c) => StatefulBuilder(
-          builder: (c, setLocal) => AlertDialog(
-            title: const Text('Conta bancária do extrato'),
+  Future<void> openFinanceSandbox() async {
+    RecordData? snapshot;
+    var busy = false;
+    String? error;
+    await showDialog<void>(
+      context: context,
+      builder: (c) => StatefulBuilder(
+        builder: (c, update) {
+          Future<void> consult({bool connect = false}) async {
+            update(() {
+              busy = true;
+              error = null;
+            });
+            try {
+              if (connect) {
+                await api.request('$base/open-finance/sandbox/connect', {});
+              }
+              final value = RecordData.from(
+                await api.request('$base/open-finance/sandbox'),
+              );
+              if (c.mounted) update(() => snapshot = value);
+            } catch (e) {
+              if (c.mounted) {
+                update(
+                  () => error = e.toString().replaceFirst('Exception: ', ''),
+                );
+              }
+            } finally {
+              if (c.mounted) update(() => busy = false);
+            }
+          }
+
+          final bankAccounts = snapshot == null
+              ? <RecordData>[]
+              : rows(snapshot!['accounts']);
+          return AlertDialog(
+            title: const Text('OPEN FINANCE — SANDBOX'),
             content: SizedBox(
-              width: 430,
-              child: DropdownButtonFormField<int>(
-                initialValue: accountId,
-                decoration: const InputDecoration(
-                  labelText: 'Conta financeira',
-                  helperText: 'As baixas serão movimentadas nesta conta.',
-                ),
-                items: availableAccounts
-                    .map(
-                      (account) => DropdownMenuItem<int>(
-                        value: (account['id'] as num).toInt(),
-                        child: Text('${account['name']}'),
-                      ),
-                    )
-                    .toList(),
-                onChanged: (value) {
-                  if (value != null) setLocal(() => accountId = value);
-                },
+              width: 800,
+              height: MediaQuery.sizeOf(c).height * .6,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Text(
+                    'BANCO FICTÍCIO PLUGGY BANK. ESTE TESTE NÃO CONECTA O ITAÚ E NÃO ALTERA SEUS LANÇAMENTOS OU SALDOS.',
+                  ),
+                  const SizedBox(height: 12),
+                  if (busy) const LinearProgressIndicator(),
+                  if (error != null)
+                    Text(error!, style: const TextStyle(color: Colors.red)),
+                  if (snapshot != null && snapshot!['ready'] != true)
+                    Text(
+                      snapshot!['connected'] == true
+                          ? 'PROCESSANDO. AGUARDE ALGUNS SEGUNDOS E CLIQUE EM CONSULTAR.'
+                          : 'CLIQUE EM CONECTAR BANCO FICTÍCIO PARA COMEÇAR.',
+                    ),
+                  Expanded(
+                    child: ListView(
+                      children: [
+                        for (final a in bankAccounts) ...[
+                          Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                            child: Text(
+                              '${a['name']} • SALDO FICTÍCIO: ${money(a['balance'])} ${a['currency']}',
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                          for (final t in rows(a['transactions']))
+                            ListTile(
+                              contentPadding: EdgeInsets.zero,
+                              title: Text('${t['description']}'),
+                              subtitle: Text(
+                                '${dateLabel('${t['date']}')} • ${t['status'] == 'POSTED' ? 'REALIZADO' : 'PENDENTE'}',
+                              ),
+                              trailing: Text(money(t['amount'])),
+                            ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ],
               ),
             ),
             actions: [
               TextButton(
-                onPressed: () => Navigator.pop(c),
-                child: const Text('Cancelar'),
+                onPressed: busy ? null : () => Navigator.pop(c),
+                child: const Text('FECHAR'),
               ),
-              FilledButton(
-                onPressed: () => Navigator.pop(c, accountId),
-                child: const Text('Ler extrato'),
+              TextButton(
+                onPressed: busy ? null : () => consult(),
+                child: const Text('CONSULTAR'),
               ),
+              if (snapshot?['connected'] != true)
+                FilledButton(
+                  onPressed: busy ? null : () => consult(connect: true),
+                  child: const Text('CONECTAR BANCO FICTÍCIO'),
+                ),
             ],
-          ),
-        ),
-      );
-      if (selectedAccount == null) return;
-      accountId = selectedAccount;
-    }
-    if (!mounted) return;
-    var progressOpen = true;
-    showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => const AlertDialog(
-        content: Row(
-          children: [
-            SizedBox(
-              width: 28,
-              height: 28,
-              child: CircularProgressIndicator(strokeWidth: 3),
-            ),
-            SizedBox(width: 18),
-            Expanded(
-              child: Text('Lendo o extrato e procurando contas a pagar.'),
-            ),
-          ],
-        ),
+          );
+        },
       ),
     );
+  }
+
+  Future<void> importOfxPayables() async {
+    if (accounts.isEmpty) {
+      message('Cadastre uma conta financeira primeiro.');
+      return;
+    }
+    final file = await openFile(
+      acceptedTypeGroups: const [
+        XTypeGroup(label: 'Extrato OFX', extensions: ['ofx']),
+      ],
+    );
+    if (file == null || !mounted) return;
+    var accountId = (accounts.first['id'] as num).toInt();
+    final chosen = await showDialog<int>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('CONTA DO EXTRATO'),
+        content: DropdownButtonFormField<int>(
+          initialValue: accountId,
+          isExpanded: true,
+          items: accounts
+              .map(
+                (a) => DropdownMenuItem<int>(
+                  value: (a['id'] as num).toInt(),
+                  child: Text('${a['name']}'),
+                ),
+              )
+              .toList(),
+          onChanged: (v) {
+            if (v != null) accountId = v;
+          },
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(c),
+            child: const Text('CANCELAR'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(c, accountId),
+            child: const Text('LER EXTRATO'),
+          ),
+        ],
+      ),
+    );
+    if (chosen == null || !mounted) return;
     try {
-      final bytes = await file.readAsBytes();
       final preview = RecordData.from(
         await api.request('$base/ofx/preview', {
-          'accountId': accountId,
+          'accountId': chosen,
           'fileName': file.name,
-          'dataBase64': base64Encode(bytes),
+          'dataBase64': base64Encode(await file.readAsBytes()),
         }),
       );
-      if (progressOpen && mounted) {
-        Navigator.of(context, rootNavigator: true).pop();
-        progressOpen = false;
-      }
       if (!mounted) return;
       final transactions = rows(preview['transactions']);
-      final openPayables =
-          titles
-              .where(
-                (title) =>
-                    title['kind'] == 'payable' &&
-                    title['cancelled'] == 0 &&
-                    (title['remaining'] as num) > 0,
-              )
-              .toList()
-            ..sort((a, b) => '${a['due']}'.compareTo('${b['due']}'));
+      final matches = <int, int>{};
       final selected = <int>{};
-      final matches = <int, int?>{};
-      for (final transaction in transactions) {
-        final transactionId = (transaction['id'] as num).toInt();
-        final suggestion = transaction['suggestedTitleId'];
-        if (suggestion is num && transaction['duplicate'] != true) {
-          matches[transactionId] = suggestion.toInt();
-          selected.add(transactionId);
+      final categories = <int, String>{};
+      var updateBalance = false;
+      for (final t in transactions) {
+        final id = (t['id'] as num).toInt();
+        if (t['duplicate'] == true || t['future'] == true) continue;
+        if (t['existingSettlementId'] is num) {
+          matches[id] = -(t['existingSettlementId'] as num).toInt();
+        } else if (t['suggestedTitleId'] is num) {
+          matches[id] = (t['suggestedTitleId'] as num).toInt();
         }
+        if (matches.containsKey(id)) selected.add(id);
       }
       final confirmed = await showDialog<bool>(
         context: context,
         builder: (c) => StatefulBuilder(
-          builder: (c, setLocal) {
-            final selectedTotal = transactions
-                .where((item) => selected.contains((item['id'] as num).toInt()))
-                .fold<num>(0, (sum, item) => sum + (item['amount'] as num));
-            return AlertDialog(
-              title: const Text('Conferir pagamentos do OFX'),
-              content: SizedBox(
-                width: 1050,
-                height: 610,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(14),
-                      decoration: BoxDecoration(
-                        color: teal.withValues(alpha: .07),
-                        borderRadius: BorderRadius.circular(12),
+          builder: (c, setLocal) => AlertDialog(
+            title: const Text('CONFERIR EXTRATO OFX'),
+            content: SizedBox(
+              width: 950,
+              height: MediaQuery.sizeOf(c).height * .65,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    '${preview['accountName']} • ${preview['total']} MOVIMENTAÇÕES • ${preview['duplicates']} CONCILIADAS',
+                  ),
+                  const Text(
+                    'Confira entradas e saídas. Para o que falta, escolha CRIAR NOVO. Valores iguais são sugestões e precisam ser conferidos.',
+                  ),
+                  if (preview['bankBalance'] != null &&
+                      '${preview['balanceDate']}'.isNotEmpty)
+                    CheckboxListTile(
+                      contentPadding: EdgeInsets.zero,
+                      value: updateBalance,
+                      onChanged: (v) =>
+                          setLocal(() => updateBalance = v == true),
+                      title: Text(
+                        'CONCILIAR SALDO: ${money(preview['bankBalance'])} EM ${dateLabel(preview['balanceDate'])}',
                       ),
-                      child: Wrap(
-                        spacing: 22,
-                        runSpacing: 8,
-                        children: [
-                          Text('Conta: ${preview['accountName']}'),
-                          Text('${preview['total']} débitos encontrados'),
-                          Text('${preview['suggested']} sugestões'),
-                          Text('${preview['duplicates']} já importados'),
-                          Text(
-                            'Selecionado: ${money(selectedTotal)}',
-                            style: const TextStyle(fontWeight: FontWeight.w700),
-                          ),
-                        ],
+                      subtitle: Text(
+                        'SALDO NO SISTEMA: ${money(preview['currentBalance'])}. A diferença será registrada como ajuste identificado na data do banco.',
                       ),
                     ),
-                    const SizedBox(height: 12),
-                    const Text(
-                      'Confira cada linha. Somente as movimentações marcadas serão baixadas.',
-                    ),
-                    const SizedBox(height: 10),
-                    Expanded(
-                      child: ListView.separated(
-                        itemCount: transactions.length,
-                        separatorBuilder: (_, _) => const Divider(height: 1),
-                        itemBuilder: (_, index) {
-                          final item = transactions[index];
-                          final id = (item['id'] as num).toInt();
-                          final duplicate = item['duplicate'] == true;
-                          final matchedTitleId = matches[id];
-                          final matched = matchedTitleId == null
-                              ? null
-                              : openPayables
-                                    .where(
-                                      (title) =>
-                                          (title['id'] as num).toInt() ==
-                                          matchedTitleId,
-                                    )
-                                    .firstOrNull;
-                          final difference = matched == null
-                              ? 0
-                              : (item['amount'] as num) -
-                                    (matched['remaining'] as num);
-                          return Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 8),
-                            child: Row(
-                              crossAxisAlignment: CrossAxisAlignment.start,
+                  TextButton(
+                    onPressed: () => setLocal(() {
+                      for (final t in transactions) {
+                        if (t['duplicate'] == true || t['future'] == true) {
+                          continue;
+                        }
+                        final id = (t['id'] as num).toInt();
+                        matches.putIfAbsent(id, () => 0);
+                        selected.add(id);
+                      }
+                    }),
+                    child: const Text('SELECIONAR TODAS / CRIAR AS QUE FALTAM'),
+                  ),
+                  Expanded(
+                    child: ListView.builder(
+                      itemCount: transactions.length,
+                      itemBuilder: (_, index) {
+                        final t = transactions[index];
+                        final id = (t['id'] as num).toInt();
+                        final blocked =
+                            t['duplicate'] == true || t['future'] == true;
+                        final candidates = titles
+                            .where(
+                              (v) =>
+                                  v['kind'] == t['kind'] &&
+                                  v['cancelled'] == 0 &&
+                                  (v['remaining'] as num) > 0,
+                            )
+                            .toList();
+                        final planOptions = plans
+                            .where((p) => p['kind'] == t['kind'])
+                            .toList();
+                        return Card(
+                          child: Padding(
+                            padding: const EdgeInsets.all(12),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
                               children: [
-                                Checkbox(
+                                CheckboxListTile(
+                                  contentPadding: EdgeInsets.zero,
                                   value: selected.contains(id),
-                                  onChanged: duplicate || matchedTitleId == null
+                                  onChanged: blocked
                                       ? null
-                                      : (checked) => setLocal(() {
-                                          if (checked == true) {
+                                      : (v) => setLocal(() {
+                                          if (v == true) {
+                                            matches.putIfAbsent(id, () => 0);
                                             selected.add(id);
                                           } else {
                                             selected.remove(id);
                                           }
                                         }),
-                                ),
-                                SizedBox(
-                                  width: 330,
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      Text(
-                                        '${dateLabel('${item['date']}')} • ${money(item['amount'])}',
-                                        style: const TextStyle(
-                                          fontWeight: FontWeight.w700,
-                                        ),
-                                      ),
-                                      const SizedBox(height: 4),
-                                      Text(
-                                        '${item['memo']}',
-                                        maxLines: 2,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: TextStyle(
-                                          fontSize: 12,
-                                          color: mutedText,
-                                        ),
-                                      ),
-                                      if (duplicate)
-                                        const Text(
-                                          'JÁ IMPORTADO',
-                                          style: TextStyle(
-                                            color: Color(0xFFB23A3A),
-                                            fontSize: 11,
-                                            fontWeight: FontWeight.w700,
-                                          ),
-                                        ),
-                                    ],
+                                  title: Text(
+                                    '${t['kind'] == 'payable' ? 'SAÍDA' : 'ENTRADA'} • ${money(t['amount'])} • ${dateLabel(t['date'])}',
+                                  ),
+                                  subtitle: Text(
+                                    '${t['memo']}${t['future'] == true
+                                        ? '\nDATA FUTURA: AGUARDAR REALIZAÇÃO'
+                                        : t['duplicate'] == true
+                                        ? '\nJÁ CONCILIADA'
+                                        : ''}',
                                   ),
                                 ),
-                                const SizedBox(width: 14),
-                                Expanded(
-                                  child: DropdownButtonFormField<int>(
-                                    key: ValueKey('ofx-$id-$matchedTitleId'),
-                                    initialValue: matchedTitleId,
+                                if (!blocked)
+                                  DropdownButtonFormField<int>(
+                                    key: ValueKey('ofx-$id-${matches[id]}'),
+                                    initialValue: matches[id],
                                     isExpanded: true,
-                                    decoration: InputDecoration(
-                                      labelText: duplicate
-                                          ? 'Movimentação já utilizada'
-                                          : 'Conta a pagar correspondente',
-                                      helperText: matched == null
-                                          ? 'Selecione o lançamento correto'
-                                          : difference > 0
-                                          ? 'Diferença de ${money(difference)} será registrada como acréscimo'
-                                          : difference < 0
-                                          ? 'Será feita uma baixa parcial'
-                                          : 'Valor conferido',
+                                    decoration: const InputDecoration(
+                                      labelText:
+                                          'O QUE FAZER COM ESTA MOVIMENTAÇÃO?',
                                     ),
-                                    items: openPayables
-                                        .map(
-                                          (title) => DropdownMenuItem<int>(
-                                            value: (title['id'] as num).toInt(),
-                                            child: Text(
-                                              '${title['description']} • ${title['partyName'] ?? 'SEM FORNECEDOR'} • ${dateLabel('${title['due']}')} • ${money(title['remaining'])}',
-                                              overflow: TextOverflow.ellipsis,
-                                            ),
+                                    items: [
+                                      const DropdownMenuItem<int>(
+                                        value: 0,
+                                        child: Text(
+                                          'CRIAR NOVO LANÇAMENTO E BAIXAR',
+                                        ),
+                                      ),
+                                      if (t['existingSettlementId'] is num)
+                                        DropdownMenuItem<int>(
+                                          value:
+                                              -(t['existingSettlementId']
+                                                      as num)
+                                                  .toInt(),
+                                          child: Text(
+                                            'VINCULAR BAIXA EXISTENTE: ${t['existingSettlementDescription']}',
+                                            overflow: TextOverflow.ellipsis,
                                           ),
-                                        )
-                                        .toList(),
-                                    onChanged: duplicate
-                                        ? null
-                                        : (value) => setLocal(() {
-                                            matches[id] = value;
-                                            if (value == null) {
-                                              selected.remove(id);
-                                            } else {
-                                              selected.add(id);
-                                            }
-                                          }),
+                                        ),
+                                      ...candidates.map(
+                                        (v) => DropdownMenuItem<int>(
+                                          value: (v['id'] as num).toInt(),
+                                          child: Text(
+                                            '${v['description']} • ${money(v['remaining'])}',
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                    onChanged: (v) => setLocal(() {
+                                      if (v != null) {
+                                        matches[id] = v;
+                                        selected.add(id);
+                                      }
+                                    }),
                                   ),
-                                ),
+                                if (!blocked &&
+                                    matches[id] == 0 &&
+                                    planOptions.isNotEmpty)
+                                  Padding(
+                                    padding: const EdgeInsets.only(top: 8),
+                                    child: DropdownButtonFormField<String>(
+                                      isExpanded: true,
+                                      initialValue: categories[id],
+                                      decoration: const InputDecoration(
+                                        labelText: 'PLANO DE CONTAS (OPCIONAL)',
+                                      ),
+                                      items: planOptions
+                                          .map(
+                                            (p) => DropdownMenuItem<String>(
+                                              value: '${p['name']}',
+                                              child: Text('${p['name']}'),
+                                            ),
+                                          )
+                                          .toList(),
+                                      onChanged: (v) {
+                                        if (v != null) categories[id] = v;
+                                      },
+                                    ),
+                                  ),
+                                if (!blocked && (matches[id] ?? 0) < 0)
+                                  const Text(
+                                    'A BAIXA JÁ EXISTE. VINCULAR NÃO MOVIMENTARÁ O SALDO NOVAMENTE.',
+                                  ),
                               ],
                             ),
-                          );
-                        },
-                      ),
+                          ),
+                        );
+                      },
                     ),
-                  ],
-                ),
+                  ),
+                ],
               ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(c, false),
-                  child: const Text('Cancelar'),
-                ),
-                FilledButton.icon(
-                  onPressed: selected.isEmpty
-                      ? null
-                      : () => Navigator.pop(c, true),
-                  icon: const Icon(Icons.check_circle_outline),
-                  label: Text('Confirmar ${selected.length} baixa(s)'),
-                ),
-              ],
-            );
-          },
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(c, false),
+                child: const Text('CANCELAR'),
+              ),
+              FilledButton(
+                onPressed: selected.isEmpty && !updateBalance
+                    ? null
+                    : () => Navigator.pop(c, true),
+                child: Text('CONFIRMAR ${selected.length} MOVIMENTAÇÕES'),
+              ),
+            ],
+          ),
         ),
       );
       if (confirmed != true) return;
       final result = await api.request('$base/ofx/confirm', {
         'importId': preview['importId'],
+        'updateBalance': updateBalance,
         'items': selected
-            .map((id) => {'transactionId': id, 'titleId': matches[id]})
+            .map(
+              (id) => {
+                'transactionId': id,
+                'titleId': (matches[id] ?? 0) > 0 ? matches[id] : 0,
+                'create': matches[id] == 0,
+                'category': categories[id] ?? '',
+                'existingSettlementId': (matches[id] ?? 0) < 0
+                    ? -matches[id]!
+                    : null,
+              },
+            )
             .toList(),
       });
       await load();
       message(
-        '${result['count']} pagamento(s) baixado(s) pelo extrato. Total: ${money(result['total'])}.',
+        '${result['count']} MOVIMENTAÇÕES CONCILIADAS. AJUSTE DE SALDO: ${money(result['balanceAdjustment'] ?? 0)}.',
       );
     } catch (e) {
-      if (progressOpen && mounted) {
-        Navigator.of(context, rootNavigator: true).pop();
-      }
       message(e.toString().replaceFirst('Exception: ', ''));
     }
   }
@@ -6325,5 +6686,592 @@ class _WorkspaceState extends State<Workspace> {
           ? 'Este lançamento já foi cancelado. Ao excluir, ele sairá das listas, mas o cancelamento e a exclusão continuarão registrados no histórico.'
           : 'O lançamento sairá das listas e a exclusão ficará registrada no histórico. Se houve baixa, ela precisa estar estornada antes da exclusão.',
     );
+  }
+
+  String creditCardInvoiceStatus(RecordData invoice) {
+    if ('${invoice['closedAt'] ?? ''}'.isEmpty) return 'Aberta';
+    if ((invoice['amount'] as num) == 0) return 'Sem compras';
+    if (invoice['cancelled'] == 1) return 'Cancelada';
+    if ((invoice['remaining'] as num) == 0) return 'Paga';
+    return 'Fechada';
+  }
+
+  Widget creditMetric(String label, String value, IconData icon) => SizedBox(
+    width: 245,
+    child: Card(
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(icon, size: 20, color: teal),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    label,
+                    style: TextStyle(color: mutedText, fontSize: 12),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Text(
+              value,
+              style: const TextStyle(
+                color: teal,
+                fontSize: 23,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+
+  List<Widget> creditCardsPage() {
+    final openInvoices = creditCardInvoices.where(
+      (invoice) =>
+          invoice['cancelled'] == 0 && (invoice['remaining'] as num) > 0,
+    );
+    final openTotal = total(openInvoices, 'remaining');
+    final currentReference = iso(DateTime.now()).substring(0, 7);
+    final currentTotal = total(
+      openInvoices.where(
+        (invoice) => invoice['referenceMonth'] == currentReference,
+      ),
+      'remaining',
+    );
+    return [
+      Wrap(
+        spacing: 14,
+        runSpacing: 14,
+        children: [
+          creditMetric(
+            'Faturas em aberto',
+            money(openTotal),
+            Icons.receipt_long_outlined,
+          ),
+          creditMetric(
+            'Fatura deste mês',
+            money(currentTotal),
+            Icons.calendar_month_outlined,
+          ),
+          creditMetric(
+            'Cartões cadastrados',
+            '${creditCards.length}',
+            Icons.credit_card_outlined,
+          ),
+        ],
+      ),
+      const SizedBox(height: 18),
+      if (creditCards.isEmpty)
+        panel(
+          'Seus cartões',
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 35),
+            child: Column(
+              children: [
+                Icon(Icons.add_card_outlined, size: 42, color: teal),
+                SizedBox(height: 12),
+                Text(
+                  'Cadastre o primeiro cartão para lançar compras e formar as faturas automaticamente.',
+                  textAlign: TextAlign.center,
+                ),
+              ],
+            ),
+          ),
+          action: FilledButton.icon(
+            onPressed: creditCardForm,
+            icon: const Icon(Icons.add),
+            label: const Text('Cadastrar cartão'),
+          ),
+        )
+      else
+        ...creditCards.map((card) {
+          final lastFour = '${card['lastFour'] ?? ''}'.trim();
+          final invoices =
+              creditCardInvoices
+                  .where((invoice) => invoice['cardId'] == card['id'])
+                  .toList()
+                ..sort((a, b) {
+                  final aOpen = '${a['closedAt'] ?? ''}'.isEmpty;
+                  final bOpen = '${b['closedAt'] ?? ''}'.isEmpty;
+                  if (aOpen != bOpen) return aOpen ? -1 : 1;
+                  return aOpen
+                      ? '${a['dueDate']}'.compareTo('${b['dueDate']}')
+                      : '${b['dueDate']}'.compareTo('${a['dueDate']}');
+                });
+          final recurringCharges = creditCardRecurringCharges
+              .where((charge) => charge['cardId'] == card['id'])
+              .toList();
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 16),
+            child: panel(
+              '${card['name']}${lastFour.isEmpty ? '' : ' • FINAL $lastFour'}',
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Wrap(
+                    spacing: 22,
+                    runSpacing: 8,
+                    children: [
+                      Text('FECHA DIA ${card['closingDay']}'),
+                      Text('VENCE DIA ${card['dueDay']}'),
+                      if ((card['accountName'] ?? '').toString().isNotEmpty)
+                        Text('PAGAMENTO: ${card['accountName']}'),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  if (recurringCharges.isNotEmpty) ...[
+                    Container(
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: darkMode
+                            ? const Color(0xFF1B2423)
+                            : const Color(0xFFF1F6F5),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(color: teal.withValues(alpha: .16)),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          const Text(
+                            'COBRANÇAS RECORRENTES',
+                            style: TextStyle(fontWeight: FontWeight.w800),
+                          ),
+                          const SizedBox(height: 8),
+                          ...recurringCharges.map(
+                            (charge) => ListTile(
+                              contentPadding: EdgeInsets.zero,
+                              dense: true,
+                              leading: Icon(
+                                charge['active'] == 1
+                                    ? Icons.autorenew
+                                    : Icons.stop_circle_outlined,
+                                color: charge['active'] == 1 ? teal : mutedText,
+                              ),
+                              title: Text('${charge['description']}'),
+                              subtitle: Text(
+                                '${money(charge['amount'])} TODO MÊS • DESDE ${dateLabel('${charge['startDate']}')}',
+                              ),
+                              trailing: charge['active'] == 1
+                                  ? TextButton(
+                                      onPressed: () =>
+                                          stopCreditCardRecurrence(charge),
+                                      child: const Text('Encerrar'),
+                                    )
+                                  : const Text(
+                                      'ENCERRADA',
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                  ],
+                  if (invoices.isEmpty)
+                    Text(
+                      'Nenhuma compra lançada neste cartão.',
+                      style: TextStyle(color: mutedText),
+                    )
+                  else
+                    ...invoices.map((invoice) {
+                      final purchases = creditCardPurchases
+                          .where(
+                            (purchase) =>
+                                purchase['invoiceId'] == invoice['id'],
+                          )
+                          .toList();
+                      final title = titles
+                          .where((item) => item['id'] == invoice['titleId'])
+                          .firstOrNull;
+                      final invoiceStatus = creditCardInvoiceStatus(invoice);
+                      return Card(
+                        color: darkMode
+                            ? const Color(0xFF252C2B)
+                            : const Color(0xFFF8FAF9),
+                        elevation: 0,
+                        margin: const EdgeInsets.only(bottom: 10),
+                        child: ExpansionTile(
+                          leading: const Icon(
+                            Icons.receipt_long_outlined,
+                            color: teal,
+                          ),
+                          title: Text(
+                            'FATURA ${invoice['referenceMonth'].toString().substring(5)}/${invoice['referenceMonth'].toString().substring(0, 4)}',
+                            style: const TextStyle(fontWeight: FontWeight.w700),
+                          ),
+                          subtitle: Text(
+                            'FECHAMENTO ${dateLabel('${invoice['closingDate']}')} • VENCIMENTO ${dateLabel('${invoice['dueDate']}')} • ${purchases.length} ${purchases.length == 1 ? 'ITEM' : 'ITENS'}',
+                          ),
+                          trailing: SizedBox(
+                            width: 235,
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.end,
+                              children: [
+                                Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  crossAxisAlignment: CrossAxisAlignment.end,
+                                  children: [
+                                    Text(
+                                      money(invoice['amount']),
+                                      style: const TextStyle(
+                                        fontWeight: FontWeight.w800,
+                                      ),
+                                    ),
+                                    Text(
+                                      invoiceStatus,
+                                      style: TextStyle(
+                                        color: invoiceStatus == 'Paga'
+                                            ? const Color(0xFF23734D)
+                                            : invoiceStatus == 'Fechada'
+                                            ? const Color(0xFFC06A16)
+                                            : teal,
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                if (title != null &&
+                                    title['cancelled'] == 0 &&
+                                    title['remaining'] > 0) ...[
+                                  const SizedBox(width: 10),
+                                  TextButton(
+                                    onPressed: () => settleForm(title),
+                                    child: const Text('Pagar'),
+                                  ),
+                                ],
+                              ],
+                            ),
+                          ),
+                          children: purchases
+                              .map(
+                                (purchase) => ListTile(
+                                  leading: const Icon(
+                                    Icons.shopping_bag_outlined,
+                                    size: 20,
+                                  ),
+                                  title: Text('${purchase['description']}'),
+                                  subtitle: Text(
+                                    '${dateLabel('${purchase['purchaseDate']}')} • ${purchase['category']}${purchase['recurringChargeId'] != null
+                                        ? ' • RECORRENTE'
+                                        : purchase['installmentCount'] > 1
+                                        ? ' • PARCELA ${purchase['installmentNumber']}/${purchase['installmentCount']}'
+                                        : ''}',
+                                  ),
+                                  trailing: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Text(
+                                        money(purchase['amount']),
+                                        style: const TextStyle(
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
+                                      if ('${invoice['closedAt'] ?? ''}'
+                                          .isEmpty)
+                                        IconButton(
+                                          tooltip: 'Excluir esta compra e suas parcelas',
+                                          onPressed: () =>
+                                              deleteCreditCardPurchase(
+                                                purchase,
+                                              ),
+                                          icon: const Icon(
+                                            Icons.delete_outline,
+                                            size: 20,
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                ),
+                              )
+                              .toList(),
+                        ),
+                      );
+                    }),
+                ],
+              ),
+              action: Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  FilledButton.icon(
+                    onPressed: () => creditCardForm(card),
+                    icon: const Icon(Icons.edit_outlined, size: 18),
+                    label: const Text('Editar cartão'),
+                  ),
+                  FilledButton.icon(
+                    onPressed: () => creditCardPurchaseForm(card),
+                    icon: const Icon(Icons.add_shopping_cart, size: 18),
+                    label: const Text('Lançar compra'),
+                  ),
+                ],
+              ),
+            ),
+          );
+        }),
+    ];
+  }
+
+  void creditCardForm([RecordData? card]) {
+    form(
+      card == null ? 'Cadastrar cartão de crédito' : 'Editar cartão de crédito',
+      [
+        FormFieldSpec(
+          'name',
+          'Nome do cartão',
+          initial: '${card?['name'] ?? ''}',
+          required: true,
+          hint: 'Ex.: ITAÚ EMPRESARIAL',
+        ),
+        FormFieldSpec(
+          'lastFour',
+          'Final do cartão (opcional)',
+          initial: '${card?['lastFour'] ?? ''}',
+          hint: 'Ex.: 1234',
+          helper: 'Use somente os quatro últimos dígitos.',
+        ),
+        FormFieldSpec(
+          'closingDay',
+          'Dia de fechamento',
+          initial: '${card?['closingDay'] ?? ''}',
+          required: true,
+          hint: 'Ex.: 10',
+        ),
+        FormFieldSpec(
+          'dueDay',
+          'Dia de vencimento',
+          initial: '${card?['dueDay'] ?? ''}',
+          required: true,
+          hint: 'Ex.: 17',
+        ),
+        FormFieldSpec(
+          'accountId',
+          'Conta usada para pagar (opcional)',
+          initial: '${card?['accountId'] ?? ''}',
+          options: [
+            const MapEntry('', 'DEFINIR NO MOMENTO DA BAIXA'),
+            ...options(accounts),
+          ],
+        ),
+        FormFieldSpec(
+          'notes',
+          'Observações',
+          initial: '${card?['notes'] ?? ''}',
+        ),
+      ],
+      (values) async {
+        final path = card == null
+            ? '$base/credit-cards'
+            : '$base/credit-cards/${card['id']}/edit';
+        await api.request(path, {
+          'name': values['name'],
+          'lastFour': values['lastFour'],
+          'closingDay': int.tryParse(values['closingDay'] ?? ''),
+          'dueDay': int.tryParse(values['dueDay'] ?? ''),
+          'accountId': int.tryParse(values['accountId'] ?? ''),
+          'notes': values['notes'],
+        });
+      },
+      note: card == null
+          ? 'O fechamento define em qual fatura cada compra entra. A fatura aparecerá automaticamente no Contas a Pagar.'
+          : 'As compras e faturas existentes continuarão vinculadas a este cartão.',
+    );
+  }
+
+  void creditCardPurchaseForm([RecordData? selectedCard]) {
+    final payablePlans = plans
+        .where((plan) => plan['kind'] == 'payable')
+        .toList();
+    form(
+      'Lançar compra no cartão',
+      [
+        FormFieldSpec(
+          'cardId',
+          'Cartão',
+          initial: '${selectedCard?['id'] ?? creditCards.first['id']}',
+          required: true,
+          options: options(creditCards),
+        ),
+        FormFieldSpec('description', 'O que foi comprado?', required: true),
+        FormFieldSpec(
+          'amount',
+          'Valor total (R\$)',
+          required: true,
+          money: true,
+        ),
+        FormFieldSpec(
+          'purchaseDate',
+          'Data da compra',
+          initial: iso(DateTime.now()),
+          required: true,
+          date: true,
+        ),
+        FormFieldSpec(
+          'mode',
+          'Como deseja lançar?',
+          initial: 'single',
+          required: true,
+          options: const [
+            MapEntry('single', 'COMPRA ÚNICA'),
+            MapEntry('installments', 'COMPRA PARCELADA'),
+            MapEntry('recurring', 'COBRANÇA RECORRENTE TODO MÊS'),
+          ],
+        ),
+        FormFieldSpec(
+          'installments',
+          'Quantidade de parcelas (somente para compra parcelada)',
+          initial: '1',
+        ),
+        FormFieldSpec(
+          'category',
+          'Plano de contas',
+          initial:
+              payablePlans.any((plan) => plan['name'] == 'CARTÃO DE CRÉDITO')
+              ? 'CARTÃO DE CRÉDITO'
+              : '${payablePlans.firstOrNull?['name'] ?? ''}',
+          required: true,
+          options: payablePlans
+              .map((plan) => MapEntry('${plan['name']}', '${plan['name']}'))
+              .toList(),
+        ),
+        FormFieldSpec('notes', 'Observações'),
+      ],
+      (values) async {
+        await api.request(
+          '$base/credit-cards/${int.parse(values['cardId']!)}/purchases',
+          {
+            'description': values['description'],
+            'amount': parseMoney(values['amount']!),
+            'purchaseDate': values['purchaseDate'],
+            'mode': values['mode'],
+            'installments': int.tryParse(values['installments'] ?? ''),
+            'category': values['category'],
+            'notes': values['notes'],
+          },
+        );
+      },
+      note: 'Na compra parcelada, o valor total é dividido. Na cobrança recorrente, o mesmo valor entra todo mês até você encerrar.',
+    );
+  }
+
+  Future<void> stopCreditCardRecurrence(RecordData recurrence) async {
+    final reasonController = TextEditingController();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Encerrar cobrança recorrente'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              '${recurrence['description']} deixará de entrar nas próximas faturas. As faturas já fechadas ou pagas serão preservadas.',
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: reasonController,
+              textCapitalization: TextCapitalization.characters,
+              decoration: const InputDecoration(
+                labelText: 'Motivo do encerramento',
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Voltar'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Encerrar cobrança'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) {
+      reasonController.dispose();
+      return;
+    }
+    try {
+      await api.request(
+        '$base/credit-card-recurrences/${recurrence['id']}/stop',
+        {'reason': reasonController.text},
+      );
+      await load();
+      message('Cobrança recorrente encerrada.');
+    } catch (e) {
+      message(e.toString().replaceFirst('Exception: ', ''));
+    } finally {
+      reasonController.dispose();
+    }
+  }
+
+  Future<void> deleteCreditCardPurchase(RecordData purchase) async {
+    final reasonController = TextEditingController();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Excluir compra do cartão'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              purchase['recurringChargeId'] != null
+                  ? 'Somente esta cobrança mensal será retirada da fatura. A recorrência continuará nos próximos meses.'
+                  : purchase['installmentCount'] > 1
+                  ? 'Todas as ${purchase['installmentCount']} parcelas desta compra serão retiradas das faturas.'
+                  : 'Esta compra será retirada da fatura.',
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: reasonController,
+              textCapitalization: TextCapitalization.characters,
+              decoration: const InputDecoration(
+                labelText: 'Motivo da exclusão',
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Voltar'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Excluir compra'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) {
+      reasonController.dispose();
+      return;
+    }
+    try {
+      await api.request(
+        '$base/credit-card-purchases/${purchase['purchaseGroup']}/delete',
+        {'reason': reasonController.text},
+      );
+      await load();
+      message('Compra excluída e faturas atualizadas.');
+    } catch (e) {
+      message(e.toString().replaceFirst('Exception: ', ''));
+    } finally {
+      reasonController.dispose();
+    }
   }
 }

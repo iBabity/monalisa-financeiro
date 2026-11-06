@@ -239,6 +239,108 @@ sealed partial class Ledger
                 PRAGMA user_version=14;
                 """);
         }
+        currentVersion = Convert.ToInt32(Query(c, "PRAGMA user_version")[0]["user_version"]);
+        if (currentVersion < 15)
+        {
+            if (Query(c, "SELECT id FROM companies LIMIT 1").Count > 0) Backup();
+            Run(c, """
+                CREATE TABLE IF NOT EXISTS credit_cards(
+                    id INTEGER PRIMARY KEY,companyId INTEGER NOT NULL REFERENCES companies(id),
+                    name TEXT NOT NULL,closingDay INTEGER NOT NULL CHECK(closingDay BETWEEN 1 AND 31),
+                    dueDay INTEGER NOT NULL CHECK(dueDay BETWEEN 1 AND 31),
+                    accountId INTEGER REFERENCES accounts(id),notes TEXT NOT NULL DEFAULT '',active INTEGER NOT NULL DEFAULT 1,
+                    created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,UNIQUE(companyId,name));
+                CREATE TABLE IF NOT EXISTS credit_card_invoices(
+                    id INTEGER PRIMARY KEY,companyId INTEGER NOT NULL REFERENCES companies(id),
+                    cardId INTEGER NOT NULL REFERENCES credit_cards(id),referenceMonth TEXT NOT NULL,
+                    closingDate TEXT NOT NULL,dueDate TEXT NOT NULL,titleId INTEGER NOT NULL UNIQUE REFERENCES titles(id),
+                    created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,UNIQUE(cardId,referenceMonth));
+                CREATE TABLE IF NOT EXISTS credit_card_purchases(
+                    id INTEGER PRIMARY KEY,companyId INTEGER NOT NULL REFERENCES companies(id),
+                    cardId INTEGER NOT NULL REFERENCES credit_cards(id),invoiceId INTEGER NOT NULL REFERENCES credit_card_invoices(id),
+                    purchaseGroup TEXT NOT NULL,description TEXT NOT NULL,category TEXT NOT NULL,notes TEXT NOT NULL DEFAULT '',
+                    amount INTEGER NOT NULL CHECK(amount>0),purchaseDate TEXT NOT NULL,
+                    installmentNumber INTEGER NOT NULL DEFAULT 1,installmentCount INTEGER NOT NULL DEFAULT 1,
+                    created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+                CREATE INDEX IF NOT EXISTS ix_credit_card_invoices_company ON credit_card_invoices(companyId,dueDate);
+                CREATE INDEX IF NOT EXISTS ix_credit_card_purchases_invoice ON credit_card_purchases(invoiceId,id);
+                CREATE INDEX IF NOT EXISTS ix_credit_card_purchases_group ON credit_card_purchases(companyId,purchaseGroup);
+                PRAGMA user_version=15;
+                """);
+        }
+        currentVersion = Convert.ToInt32(Query(c, "PRAGMA user_version")[0]["user_version"]);
+        if (currentVersion < 16)
+        {
+            if (Query(c, "SELECT id FROM companies LIMIT 1").Count > 0) Backup();
+            Run(c, """
+                CREATE TABLE IF NOT EXISTS credit_card_recurring_charges(
+                    id INTEGER PRIMARY KEY,companyId INTEGER NOT NULL REFERENCES companies(id),
+                    cardId INTEGER NOT NULL REFERENCES credit_cards(id),description TEXT NOT NULL,
+                    amount INTEGER NOT NULL CHECK(amount>0),startDate TEXT NOT NULL,category TEXT NOT NULL,
+                    notes TEXT NOT NULL DEFAULT '',active INTEGER NOT NULL DEFAULT 1,endedDate TEXT NOT NULL DEFAULT '',
+                    created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+                CREATE TABLE IF NOT EXISTS credit_card_recurring_skips(
+                    id INTEGER PRIMARY KEY,recurringChargeId INTEGER NOT NULL REFERENCES credit_card_recurring_charges(id),
+                    referenceMonth TEXT NOT NULL,reason TEXT NOT NULL DEFAULT '',created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(recurringChargeId,referenceMonth));
+                ALTER TABLE credit_card_purchases ADD COLUMN recurringChargeId INTEGER REFERENCES credit_card_recurring_charges(id);
+                CREATE INDEX IF NOT EXISTS ix_credit_card_recurring_company ON credit_card_recurring_charges(companyId,active);
+                CREATE INDEX IF NOT EXISTS ix_credit_card_purchases_recurring ON credit_card_purchases(recurringChargeId,invoiceId);
+                PRAGMA user_version=16;
+                """);
+        }
+        currentVersion = Convert.ToInt32(Query(c, "PRAGMA user_version")[0]["user_version"]);
+        if (currentVersion < 17)
+        {
+            if (Query(c, "SELECT id FROM companies LIMIT 1").Count > 0) Backup();
+            Run(c, "ALTER TABLE credit_cards ADD COLUMN lastFour TEXT NOT NULL DEFAULT ''; PRAGMA user_version=17");
+        }
+        currentVersion = Convert.ToInt32(Query(c, "PRAGMA user_version")[0]["user_version"]);
+        if (currentVersion < 18)
+        {
+            if (Query(c, "SELECT id FROM companies LIMIT 1").Count > 0) Backup();
+            Run(c, """
+                ALTER TABLE credit_cards ADD COLUMN startDate TEXT NOT NULL DEFAULT '';
+                UPDATE credit_cards SET startDate=substr(created,1,10) WHERE startDate='';
+
+                PRAGMA foreign_keys=OFF;
+                BEGIN IMMEDIATE;
+                CREATE TABLE credit_card_invoices_v18(
+                    id INTEGER PRIMARY KEY,companyId INTEGER NOT NULL REFERENCES companies(id),
+                    cardId INTEGER NOT NULL REFERENCES credit_cards(id),referenceMonth TEXT NOT NULL,
+                    closingDate TEXT NOT NULL,dueDate TEXT NOT NULL,titleId INTEGER UNIQUE REFERENCES titles(id),
+                    closedAt TEXT NOT NULL DEFAULT '',created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(cardId,referenceMonth));
+                INSERT INTO credit_card_invoices_v18(id,companyId,cardId,referenceMonth,closingDate,dueDate,titleId,closedAt,created)
+                SELECT i.id,i.companyId,i.cardId,i.referenceMonth,i.closingDate,i.dueDate,i.titleId,
+                    CASE WHEN i.closingDate<date('now')
+                           OR EXISTS(SELECT 1 FROM settlements s WHERE s.titleId=i.titleId AND s.reversed=0)
+                           OR EXISTS(SELECT 1 FROM titles t WHERE t.id=i.titleId AND t.cancelled=1)
+                         THEN i.closingDate ELSE '' END,
+                    i.created
+                FROM credit_card_invoices i;
+                DROP TABLE credit_card_invoices;
+                ALTER TABLE credit_card_invoices_v18 RENAME TO credit_card_invoices;
+                CREATE INDEX ix_credit_card_invoices_company ON credit_card_invoices(companyId,dueDate);
+                UPDATE titles SET deleted=1
+                WHERE id IN (SELECT titleId FROM credit_card_invoices WHERE closedAt='' AND titleId IS NOT NULL);
+                COMMIT;
+                PRAGMA foreign_keys=ON;
+                PRAGMA user_version=18;
+                """);
+        }
+        currentVersion = Convert.ToInt32(Query(c, "PRAGMA user_version")[0]["user_version"]);
+        if (currentVersion < 19)
+        {
+            if (Query(c, "SELECT id FROM companies LIMIT 1").Count > 0) Backup();
+            Run(c, "PRAGMA user_version=19");
+        }
+        currentVersion = Convert.ToInt32(Query(c, "PRAGMA user_version")[0]["user_version"]);
+        if (currentVersion < 20)
+        {
+            if (Query(c, "SELECT id FROM companies LIMIT 1").Count > 0) Backup();
+            Run(c, "ALTER TABLE ofx_imports ADD COLUMN bankBalance INTEGER; ALTER TABLE ofx_imports ADD COLUMN balanceDate TEXT NOT NULL DEFAULT ''; PRAGMA user_version=20");
+        }
         foreach (var company in Query(c, "SELECT id FROM companies")) { var companyId = Convert.ToInt32(company["id"]); SeedPlans(c, companyId); SeedAuxiliaries(c, companyId); }
     }
     SqliteConnection Open() { var c = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, ForeignKeys = true }.ToString()); c.Open(); return c; }
@@ -370,6 +472,8 @@ sealed partial class Ledger
         lock (gate)
         {
             using var c = Open(); Company(c, company);
+            EnsureRecurringCharges(c, company);
+            CloseCreditCardInvoices(c, company, CreditCardToday());
             var financialUser = actor is not null && !actor.GlobalAdmin && Query(c, "SELECT role FROM user_companies WHERE userId=@p0 AND companyId=@p1 AND active=1", actor.Id, company).Any(row => string.Equals(row["role"] as string, "user", StringComparison.Ordinal));
             return new
             {
@@ -379,6 +483,27 @@ sealed partial class Ledger
                 plans = Query(c, "SELECT * FROM plans WHERE companyId=@p0 ORDER BY name", company),
                 paymentMethods = Query(c, "SELECT * FROM payment_methods WHERE companyId=@p0 ORDER BY name", company),
                 costCenters = Query(c, "SELECT * FROM cost_centers WHERE companyId=@p0 ORDER BY name", company),
+                creditCards = Query(c, "SELECT cc.*,a.name AS accountName FROM credit_cards cc LEFT JOIN accounts a ON a.id=cc.accountId WHERE cc.companyId=@p0 AND cc.active=1 ORDER BY cc.name", company),
+                creditCardInvoices = Query(c, """
+                    SELECT i.*,cc.name AS cardName,cc.lastFour,t.description,
+                    COALESCE((SELECT SUM(p.amount) FROM credit_card_purchases p WHERE p.invoiceId=i.id),0) AS amount,
+                    COALESCE(t.cancelled,0) AS cancelled,COALESCE(t.deleted,0) AS deleted,
+                    COALESCE((SELECT SUM(s.principal) FROM settlements s WHERE s.titleId=t.id AND s.reversed=0),0) AS settled,
+                    COALESCE((SELECT SUM(p.amount) FROM credit_card_purchases p WHERE p.invoiceId=i.id),0)-
+                        COALESCE((SELECT SUM(s.principal) FROM settlements s WHERE s.titleId=t.id AND s.reversed=0),0) AS remaining
+                    FROM credit_card_invoices i JOIN credit_cards cc ON cc.id=i.cardId LEFT JOIN titles t ON t.id=i.titleId
+                    WHERE i.companyId=@p0 ORDER BY i.dueDate DESC,i.id DESC
+                    """, company),
+                creditCardPurchases = Query(c, """
+                    SELECT p.*,i.referenceMonth,i.dueDate,cc.name AS cardName
+                    FROM credit_card_purchases p JOIN credit_card_invoices i ON i.id=p.invoiceId JOIN credit_cards cc ON cc.id=p.cardId
+                    WHERE p.companyId=@p0 ORDER BY i.dueDate DESC,p.purchaseDate DESC,p.id DESC
+                    """, company),
+                creditCardRecurringCharges = Query(c, """
+                    SELECT r.*,cc.name AS cardName
+                    FROM credit_card_recurring_charges r JOIN credit_cards cc ON cc.id=r.cardId
+                    WHERE r.companyId=@p0 ORDER BY r.active DESC,r.description,r.id
+                    """, company),
                 attachments = Query(c, "SELECT id,titleId,settlementId,name,mimeType,created,length(data) AS size FROM attachments WHERE companyId=@p0 ORDER BY id DESC", company),
                 settlements = Query(c, "SELECT s.*,a.name AS accountName,pm.name AS paymentMethodName FROM settlements s JOIN accounts a ON a.id=s.accountId LEFT JOIN payment_methods pm ON pm.id=s.paymentMethodId WHERE s.companyId=@p0 ORDER BY s.id DESC", company),
                 movements = financialUser ? [] : Query(c, "SELECT m.*,a.name AS accountName FROM movements m JOIN accounts a ON a.id=m.accountId WHERE m.companyId=@p0 ORDER BY m.date DESC,m.id DESC", company),
@@ -432,7 +557,7 @@ sealed partial class Ledger
     });
     public object Duplicate(int company, int id, DuplicateInput x) => Write(c =>
     {
-        Existing(c, "titles", id, company); var t = Query(c, "SELECT * FROM titles WHERE id=@p0 AND deleted=0", id).SingleOrDefault() ?? throw new ArgumentException("Lançamento não encontrado."); var due = string.IsNullOrWhiteSpace(x.Due) ? (string)t["due"]! : Date(x.Due).ToString("yyyy-MM-dd"); var description = Regex.Replace((string)t["description"]!, @" \(\d+/\d+\)$", "") + " - CÓPIA";
+        Existing(c, "titles", id, company); EnsureManualTitle(c, id); var t = Query(c, "SELECT * FROM titles WHERE id=@p0 AND deleted=0", id).SingleOrDefault() ?? throw new ArgumentException("Lançamento não encontrado."); var due = string.IsNullOrWhiteSpace(x.Due) ? (string)t["due"]! : Date(x.Due).ToString("yyyy-MM-dd"); var description = Regex.Replace((string)t["description"]!, @" \(\d+/\d+\)$", "") + " - CÓPIA";
         Run(c, "INSERT INTO titles(companyId,kind,description,amount,due,partyId,category,notes,installmentNumber,installmentCount,interestRate,interestMode,interestValue,penaltyRate,penaltyMode,penaltyValue,discountRate,discountMode,discountValue,issueDate,branch,costCenter,paymentMethodId) VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7,1,1,@p8,@p9,@p10,@p11,@p12,@p13,@p14,@p15,@p16,@p17,@p18,@p19,@p20)", company, t["kind"], description, t["amount"], due, t["partyId"], t["category"], t["notes"], t["interestRate"], t["interestMode"], t["interestValue"], t["penaltyRate"], t["penaltyMode"], t["penaltyValue"], t["discountRate"], t["discountMode"], t["discountValue"], t["issueDate"], t["branch"], t["costCenter"], t["paymentMethodId"]); var newId = Number(Query(c, "SELECT last_insert_rowid() AS id")[0], "id"); Audit(c, company, "Duplicação", new { sourceId = id, titleId = newId, due }); return new { ok = true, id = newId };
     });
     public object Reverse(int company, int id, ReasonInput x) => Write(c =>
@@ -447,7 +572,7 @@ sealed partial class Ledger
     public object Cancel(int company, int id, CancelInput x) => Write(c =>
     {
         if (x.Scope != "single" && x.Scope != "all_open") throw new ArgumentException("Escolha cancelar somente esta parcela ou todas as parcelas em aberto.");
-        Existing(c, "titles", id, company); var reason = Required(x.Reason, "Motivo"); var all = Query(c, TitlesSql, company); var t = all.Single(r => Number(r, "id") == id);
+        Existing(c, "titles", id, company); EnsureManualTitle(c, id); var reason = Required(x.Reason, "Motivo"); var all = Query(c, TitlesSql, company); var t = all.Single(r => Number(r, "id") == id);
         if (Number(t, "settled") > 0 || Number(t, "cancelled") != 0) throw new ArgumentException("Estorne as baixas antes de cancelar. Título já cancelado não pode ser cancelado novamente.");
         var group = t["installmentGroup"] as string;
         if (x.Scope == "all_open" && group is null) throw new ArgumentException("Este lançamento não possui parcelas vinculadas.");
@@ -461,7 +586,7 @@ sealed partial class Ledger
     });
     public object Edit(int company, int id, EditTitleInput x, AuthIdentity? actor = null) => Write(c =>
     {
-        if (x.Scope != "single" && x.Scope != "all_open") throw new ArgumentException("Escolha editar somente esta parcela ou todas as parcelas sem baixa.");
+        if (x.Scope != "single" && x.Scope != "all_open") throw new ArgumentException("Escolha editar somente esta parcela ou todas as parcelas sem baixa."); Existing(c, "titles", id, company); EnsureManualTitle(c, id);
         Money(x.Amount, true); var due = Date(x.Due); var description = Required(x.Description, "Descrição");
         if (x.PartyId.HasValue) Existing(c, "parties", x.PartyId.Value, company);
         if (x.PaymentMethodId.HasValue) Existing(c, "payment_methods", x.PaymentMethodId.Value, company);
@@ -486,7 +611,7 @@ sealed partial class Ledger
     });
     public object Delete(int company, int id, DeleteInput x) => Write(c =>
     {
-        if (x.Scope != "single" && x.Scope != "all_open") throw new ArgumentException("Escolha excluir somente esta parcela ou todas as parcelas sem baixa.");
+        if (x.Scope != "single" && x.Scope != "all_open") throw new ArgumentException("Escolha excluir somente esta parcela ou todas as parcelas sem baixa."); Existing(c, "titles", id, company); EnsureManualTitle(c, id);
         var reason = Required(x.Reason, "Motivo"); var all = Query(c, TitlesSql, company); var selected = all.SingleOrDefault(r => Number(r, "id") == id) ?? throw new ArgumentException("Lançamento não encontrado.");
         if (Query(c, "SELECT id FROM settlements WHERE titleId=@p0 AND reversed=0 LIMIT 1", id).Count > 0) throw new ArgumentException("Este lançamento ainda possui uma baixa ativa. Estorne todas as baixas antes de excluir.");
         var group = selected["installmentGroup"] as string;

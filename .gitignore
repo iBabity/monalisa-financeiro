@@ -25,3 +25,13 @@ license-server/data/
 dotnet-install.ps1
 
 dist/
+
+# Configuração e dados privados de cada instalação
+api/master-access-codes.json
+.env
+.env.*
+!.env.example
+*.ofx
+*.db-journal
+pluggy-credentials.dat
+sandbox-company-*.json

@@ -1,12 +1,16 @@
 # Monalisa Financeiro
 
-Versão atual: **1.1.18**.
+Versão atual: **1.1.25**.
+
+O repositório contém o código-fonte público. Bancos, backups, extratos bancários, credenciais de integrações, chaves privadas e verificadores de senhas de instalações não fazem parte da distribuição. O Painel Central compila sem acessos configurados; para uso próprio, gere uma chave privada de suporte e a tabela local com `support/GerarTabelaSenhasMestras.ps1`. Nunca publique esses arquivos.
 
 Aplicação independente para testar o ciclo financeiro com acesso por pessoa e empresa. Interface Flutter, API C#/.NET 10, SQLite. Identidade baseada na imagem fornecida e padrões do Monalisa Sistemas.
 
-Na tela **A pagar**, o botão **Baixar pelo OFX** importa extratos bancários, identifica débitos pelo `FITID`, sugere contas em aberto por valor, data, fornecedor e descrição e somente registra as baixas escolhidas pelo usuário. A primeira versão foi validada com OFX de conta corrente do Banco Itaú.
+Nas telas **A pagar** e **A receber**, **CONCILIAR EXTRATO OFX** lê entradas e saídas, sugere títulos em aberto e reconhece baixas existentes por conta, data, valor e descrição. Confira cada sugestão ou escolha **CRIAR NOVO LANÇAMENTO E BAIXAR**, selecionando um plano de contas se desejar. Sem plano, o lançamento fica a classificar. A confirmação registra somente as linhas selecionadas. FITIDs conciliados não são baixados novamente. Movimentações futuras aparecem para consulta e aguardam realização. A opção **CONCILIAR SALDO** usa o saldo e a data do banco, registra um ajuste identificado e preserva movimentos posteriores; não altera o saldo inicial. Transferências entre contas próprias precisam ser conferidas para não serem classificadas indevidamente como receita ou despesa.
 
 ## Abrir
+
+No navegador deste computador, **A pagar / A receber → OPEN FINANCE — TESTE** permite conectar o banco fictício Pluggy Bank e consultar saldo e movimentações do Sandbox. Use `support\ConfigurarPluggy.ps1` para salvar Client ID e Secret criptografados pelo Windows no perfil local; o servidor deve rodar com o mesmo usuário. As credenciais e a API Key nunca são enviadas à interface. A conexão usa exclusivamente o conector Sandbox 2, com credenciais fictícias documentadas pela Pluggy. Depois de conectar, aguarde o processamento e clique em **CONSULTAR**. Essa primeira etapa é somente leitura e não gera títulos, baixas nem ajustes no banco financeiro; dados fictícios não são conciliados com a conta Itaú real. O piloto aceita apenas acesso local e administrador. Conta real exige uma etapa posterior de habilitação e consentimento; o botão atual não permite conexão a instituições reais.
 
 Execute `Iniciar Monalisa.cmd`. O Monalisa Financeiro abre como aplicativo nativo do Windows, em uma janela própria, sem navegador. A interface Flutter inicia o serviço C# local em segundo plano e o encerra quando a janela é fechada.
 

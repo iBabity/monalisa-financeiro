@@ -12,6 +12,7 @@ builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = 
 builder.Services.AddSingleton<Ledger>();
 builder.Services.AddSingleton<AuthSessions>();
 builder.Services.AddSingleton<LicenseGuard>();
+builder.Services.AddSingleton<PluggySandbox>();
 var app = builder.Build();
 var localNoLogin = Environment.GetEnvironmentVariable("MONALISA_NO_LOGIN") == "1";
 var networkRole = (Environment.GetEnvironmentVariable("MONALISA_NETWORK_ROLE") ?? "standalone").Trim().ToLowerInvariant();
@@ -38,6 +39,7 @@ app.Use(async (ctx, next) =>
 app.Use(async (ctx, next) =>
 {
     if (!serverMode || ctx.Connection.LocalPort != sharedPort || !ctx.Request.Path.StartsWithSegments("/api")) { await next(); return; }
+    if (IsSameOriginBrowserRequest(ctx)) { await next(); return; }
     var supplied = ctx.Request.Headers["X-Monalisa-Network-Key"].ToString();
     if (!FixedTimeTextEquals(supplied, networkKey)) { ctx.Response.StatusCode = 401; await ctx.Response.WriteAsJsonAsync(new { error = "ESTA MÁQUINA NÃO ESTÁ AUTORIZADA A USAR OS DADOS COMPARTILHADOS." }); return; }
     await next();
@@ -112,6 +114,11 @@ app.Use(async (ctx, next) =>
     await ProxyToDataServer(ctx, dataServerUrl, networkKey, proxyClient);
 });
 app.MapGet("/api/health", () => new { status = "ok", mode = networkRole, sharedData = clientMode || serverMode, dataServer = clientMode ? dataServerUrl : "" });
+app.MapGet("/api/health/mobile-access", () => new
+{
+    enabled = serverMode,
+    url = serverMode ? (Environment.GetEnvironmentVariable("MONALISA_NETWORK_SERVER_URL") ?? "").Trim().TrimEnd('/') : ""
+});
 app.MapGet("/api/license/status", async (LicenseGuard license, Ledger db) => { var result = await license.Status(); db.ApplyLicensedCompany(result); return result; });
 app.MapPost("/api/license/activate", async (LicenseActivationInput x, LicenseGuard license, Ledger db) => { var result = await license.Activate(x.ActivationKey); db.ApplyLicensedCompany(result); return result; });
 app.MapPost("/api/license/change", async (LicenseActivationInput x, LicenseGuard license, Ledger db) => { var result = await license.Change(x.ActivationKey); db.ApplyLicensedCompany(result); return result; });
@@ -181,6 +188,12 @@ app.MapPost("/api/companies/{companyId:int}/payment-methods/{id:int}/delete", (i
 app.MapPost("/api/companies/{companyId:int}/cost-centers", (int companyId, NamedInput x, Ledger db) => db.CostCenter(companyId, x));
 app.MapPost("/api/companies/{companyId:int}/cost-centers/{id:int}/edit", (int companyId, int id, NamedInput x, Ledger db) => db.EditCostCenter(companyId, id, x));
 app.MapPost("/api/companies/{companyId:int}/cost-centers/{id:int}/delete", (int companyId, int id, Ledger db) => db.DeleteCostCenter(companyId, id));
+app.MapPost("/api/companies/{companyId:int}/credit-cards", (int companyId, CreditCardInput x, Ledger db) => db.CreditCard(companyId, x));
+app.MapPost("/api/companies/{companyId:int}/credit-cards/{cardId:int}/edit", (int companyId, int cardId, CreditCardInput x, Ledger db) => db.EditCreditCard(companyId, cardId, x));
+app.MapPost("/api/companies/{companyId:int}/credit-cards/{cardId:int}/purchases", (int companyId, int cardId, CreditCardPurchaseInput x, Ledger db) => db.CreditCardPurchase(companyId, cardId, x));
+app.MapPost("/api/companies/{companyId:int}/credit-card-purchases/{purchaseGroup}/delete", (int companyId, string purchaseGroup, CreditCardPurchaseDeleteInput x, Ledger db) => db.DeleteCreditCardPurchase(companyId, purchaseGroup, x));
+app.MapPost("/api/companies/{companyId:int}/credit-card-recurrences/refresh", (int companyId, Ledger db) => db.RefreshCreditCardRecurrences(companyId));
+app.MapPost("/api/companies/{companyId:int}/credit-card-recurrences/{recurrenceId:int}/stop", (int companyId, int recurrenceId, ReasonInput x, Ledger db) => db.StopCreditCardRecurrence(companyId, recurrenceId, x));
 app.MapPost("/api/companies/{companyId:int}/titles", (int companyId, TitleInput x, HttpContext context, Ledger db) => db.Title(companyId, x, context.Items["user"] as AuthIdentity));
 app.MapPost("/api/companies/{companyId:int}/titles/{id:int}/duplicate", (int companyId, int id, DuplicateInput x, Ledger db) => db.Duplicate(companyId, id, x));
 app.MapPost("/api/companies/{companyId:int}/titles/{id:int}/settle", (int companyId, int id, SettlementInput x, Ledger db) => db.Settle(companyId, id, x));
@@ -188,6 +201,16 @@ app.MapPost("/api/companies/{companyId:int}/settlements/bulk", (int companyId, B
 app.MapPost("/api/companies/{companyId:int}/settlements/{id:int}/reverse", (int companyId, int id, ReasonInput x, Ledger db) => db.Reverse(companyId, id, x));
 app.MapPost("/api/companies/{companyId:int}/ofx/preview", (int companyId, OfxPreviewInput x, Ledger db) => db.PreviewOfx(companyId, x));
 app.MapPost("/api/companies/{companyId:int}/ofx/confirm", (int companyId, OfxConfirmInput x, Ledger db) => db.ConfirmOfx(companyId, x));
+app.MapPost("/api/companies/{companyId:int}/open-finance/sandbox/connect", async (int companyId, HttpContext ctx, Ledger db, PluggySandbox pluggy) =>
+{
+    RequireLocalSandbox(ctx, db, companyId);
+    return await pluggy.Connect(companyId);
+});
+app.MapGet("/api/companies/{companyId:int}/open-finance/sandbox", async (int companyId, HttpContext ctx, Ledger db, PluggySandbox pluggy) =>
+{
+    RequireLocalSandbox(ctx, db, companyId);
+    return await pluggy.Snapshot(companyId);
+});
 app.MapPost("/api/companies/{companyId:int}/titles/{id:int}/cancel", (int companyId, int id, CancelInput x, Ledger db) => db.Cancel(companyId, id, x));
 app.MapPost("/api/companies/{companyId:int}/titles/{id:int}/edit", (int companyId, int id, EditTitleInput x, HttpContext context, Ledger db) => db.Edit(companyId, id, x, context.Items["user"] as AuthIdentity));
 app.MapPost("/api/companies/{companyId:int}/titles/{id:int}/delete", (int companyId, int id, DeleteInput x, Ledger db) => db.Delete(companyId, id, x));
@@ -207,6 +230,23 @@ static bool FixedTimeTextEquals(string supplied, string expected)
 {
     var left = Encoding.UTF8.GetBytes(supplied); var right = Encoding.UTF8.GetBytes(expected);
     return left.Length == right.Length && CryptographicOperations.FixedTimeEquals(left, right);
+}
+
+static void RequireLocalSandbox(HttpContext context, Ledger db, int companyId)
+{
+    if (context.Connection.RemoteIpAddress is not { } address || !IPAddress.IsLoopback(address)) throw new ArgumentException("O teste Open Finance está disponível somente neste computador.");
+    if (context.Items["user"] is AuthIdentity actor && db.IsFinancialUser(actor, companyId)) throw new ArgumentException("Apenas o administrador pode testar a conexão bancária.");
+    if (db.Read($"SELECT id FROM companies WHERE id={companyId}") is not List<Dictionary<string, object?>> rows || rows.Count == 0) throw new ArgumentException("Empresa não encontrada.");
+}
+static bool IsSameOriginBrowserRequest(HttpContext context)
+{
+    if (string.Equals(context.Request.Headers["Sec-Fetch-Site"].ToString(), "same-origin", StringComparison.OrdinalIgnoreCase)) return true;
+    var expectedOrigin = $"{context.Request.Scheme}://{context.Request.Host}";
+    var origin = context.Request.Headers.Origin.ToString().TrimEnd('/');
+    if (origin.Length > 0 && string.Equals(origin, expectedOrigin, StringComparison.OrdinalIgnoreCase)) return true;
+    var referer = context.Request.Headers.Referer.ToString();
+    return Uri.TryCreate(referer, UriKind.Absolute, out var refererUri)
+        && string.Equals(refererUri.GetLeftPart(UriPartial.Authority), expectedOrigin, StringComparison.OrdinalIgnoreCase);
 }
 
 static async Task ProxyToDataServer(HttpContext context, string serverUrl, string networkKey, HttpClient client)

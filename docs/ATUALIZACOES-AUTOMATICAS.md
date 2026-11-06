@@ -2,6 +2,24 @@
 
 ## Versões iniciais
 
+- `1.1.25`: piloto Open Finance com banco fictício Pluggy Bank, consulta de saldo
+  e movimentações do Sandbox, credenciais protegidas pelo Windows e dados de
+  teste separados da base financeira. Consulta somente no computador servidor.
+- `1.1.24`: conciliação OFX de entradas e saídas, criação de lançamentos na
+  conferência, vínculo com baixas existentes e ajuste identificado do saldo na
+  data do banco. Proteção contra duplicidade e indicação de movimentos futuros.
+- `1.1.23`: botão para inserir vírgula nos campos monetários e identificação dos
+  arquivos Web para evitar carregar versões anteriores do cache.
+- `1.1.22`: valores monetários aceitam ponto ou vírgula nos centavos, com teclado
+  decimal nos formulários e na criação por conversa para celular.
+- `1.1.21`: ordena os cartões com a fatura atual primeiro, seguida da próxima;
+  o histórico fechado permanece do mais recente para o mais antigo.
+- `1.1.20`: mantém somente a fatura atual e a próxima para cobranças recorrentes;
+  faturas mais distantes são criadas apenas quando uma compra parcelada realmente
+  alcança aqueles meses. Faturas futuras vazias são removidas automaticamente.
+- `1.1.19`: fechamento automático de faturas de cartão de crédito; compras até
+  o fechamento permanecem na fatura atual, compras posteriores seguem para o
+  próximo ciclo e somente a fatura fechada gera um único Contas a Pagar.
 - `1.1.18`: reorganização interna da API, relatórios e importação OFX em
   módulos próprios; formulários e componentes visuais separados; verificação
   automatizada de compilação, análise estática e testes.
@@ -40,8 +58,9 @@
    a transição das instalações antigas.
 5. Confira a Release, o tamanho e o SHA-256 antes de liberar a versão.
 
-O repositório `monalisa-financeiro` permanece privado. O repositório público
-contém somente o manifesto e os instaladores. Toda versão publicada é
+O repositório `monalisa-financeiro` disponibiliza o código-fonte público, sem
+dados das instalações nem credenciais. O repositório `monalisa-financeiro-updates`
+contém o manifesto e os instaladores. Toda versão publicada é
 obrigatória. A máquina consulta primeiro o manifesto público do GitHub e usa o
 Painel Central como alternativa. Quando existe uma versão superior, ela baixa
 o instalador, confirma o SHA-256 e solicita a permissão do Windows para
@@ -69,4 +88,4 @@ abertura até uma nova tentativa.
 O instalador `Monalisa-Financeiro-Teste-Base-1.1.0.exe` aponta para o Painel
 Central em `http://127.0.0.1:5200` e deve ser usado apenas na mesma máquina do
 painel. Para testar uma atualização, publique no painel uma versão superior à
-instalada. A versão `1.1.18` é a referência atual deste projeto.
+instalada. A versão `1.1.21` é a referência atual deste projeto.

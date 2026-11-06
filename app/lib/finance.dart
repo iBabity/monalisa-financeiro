@@ -22,7 +22,11 @@ String cnpjLabel(Object? value) {
 }
 
 int parseMoney(String text) {
-  final value = text.trim().replaceAll('R\$', '').replaceAll(' ', '');
+  var value = text.trim().replaceAll('R\$', '').replaceAll(' ', '');
+  // Teclados móveis podem fornecer apenas ponto como separador decimal.
+  if (!value.contains(',') && RegExp(r'^-?\d+\.\d{1,2}$').hasMatch(value)) {
+    value = value.replaceAll('.', ',');
+  }
   if (!RegExp(r'^-?(?:\d+|\d{1,3}(?:\.\d{3})+)(?:,\d{1,2})?$')
       .hasMatch(value)) {
     throw const FormatException('Informe o valor no formato 1.234,56.');
@@ -196,7 +200,9 @@ class FinanceApi {
         await (data == null
                 ? client.get(uri, headers: headers)
                 : client.post(uri, headers: headers, body: jsonEncode(data)))
-            .timeout(const Duration(seconds: 15));
+            .timeout(
+              Duration(seconds: path.contains('/open-finance/') ? 90 : 15),
+            );
     dynamic body;
     try {
       body = jsonDecode(utf8.decode(response.bodyBytes));

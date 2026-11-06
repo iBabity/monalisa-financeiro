@@ -215,7 +215,9 @@ try {
     }
 
     $applicationPath = Join-Path $InstallRoot 'MonalisaFinanceiro.exe'
+    $browserLauncher = Join-Path $InstallRoot 'Abrir-Monalisa-Financeiro.ps1'
     if (-not (Test-Path -LiteralPath $applicationPath)) { throw 'O EXECUTÁVEL DO APLICATIVO WINDOWS NÃO FOI ENCONTRADO.' }
+    if (-not (Test-Path -LiteralPath $browserLauncher)) { throw 'O INICIALIZADOR PARA NAVEGADOR NÃO FOI ENCONTRADO.' }
 
     if (-not $NoShortcuts) {
         $wsh = New-Object -ComObject WScript.Shell
@@ -226,13 +228,21 @@ try {
         )
         foreach ($shortcutPath in $shortcutTargets) {
             $shortcut = $wsh.CreateShortcut($shortcutPath)
-            $shortcut.TargetPath = $applicationPath
-            $shortcut.Arguments = ''
+            $shortcut.TargetPath = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+            $shortcut.Arguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $browserLauncher + '"'
             $shortcut.WorkingDirectory = $InstallRoot
             $shortcut.IconLocation = $applicationPath + ',0'
             $shortcut.Description = if ($showcaseEdition) { 'MONALISA FINANCEIRO - DEMONSTRAÇÃO' } else { 'MONALISA FINANCEIRO' }
             $shortcut.Save()
         }
+        $startupShortcutPath = Join-Path ([Environment]::GetFolderPath('Startup')) 'Monalisa Financeiro - Servico Local.lnk'
+        $startupShortcut = $wsh.CreateShortcut($startupShortcutPath)
+        $startupShortcut.TargetPath = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $startupShortcut.Arguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $browserLauncher + '" -NoBrowser'
+        $startupShortcut.WorkingDirectory = $InstallRoot
+        $startupShortcut.IconLocation = $applicationPath + ',0'
+        $startupShortcut.Description = 'SERVIÇO LOCAL DO MONALISA FINANCEIRO'
+        $startupShortcut.Save()
         $networkShortcutName = if ($showcaseEdition) { 'Configurar rede do Monalisa Financeiro Demonstracao.lnk' } else { 'Configurar rede do Monalisa Financeiro.lnk' }
         $networkShortcutPath = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) $networkShortcutName
         $networkShortcut = $wsh.CreateShortcut($networkShortcutPath)
@@ -254,7 +264,9 @@ try {
         [System.Windows.MessageBox]::Show($successMessage, 'MONALISA FINANCEIRO') | Out-Null
     }
     if (-not $NoLaunch -and -not $restartRequired) {
-        Start-InstalledApplication $applicationPath $InstallRoot
+        Start-Process -FilePath (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') `
+            -ArgumentList @('-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',$browserLauncher) `
+            -WorkingDirectory $InstallRoot -WindowStyle Hidden | Out-Null
     }
 } finally {
     if ($removeStaging -and (Test-Path -LiteralPath $staging)) { Remove-Item -LiteralPath $staging -Recurse -Force }

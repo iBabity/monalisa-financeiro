@@ -6,7 +6,7 @@ void main() {
     expect(parseMoney('1.234,56'), 123456);
     expect(parseMoney('0,01'), 1);
     expect(parseMoney('-10,50'), -1050);
-    expect(() => parseMoney('12.34'), throwsFormatException);
+    expect(parseMoney('12.34'), 1234);
     expect(() => parseMoney('1,234'), throwsFormatException);
   });
   test('situação dá prioridade ao cancelamento e à liquidação', () {

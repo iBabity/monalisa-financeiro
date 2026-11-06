@@ -225,6 +225,8 @@ class _ExpenseConversationDialogState extends State<ExpenseConversationDialog> {
                       : TextCapitalization.none,
                   keyboardType: step == 0
                       ? TextInputType.text
+                      : step == 1
+                      ? const TextInputType.numberWithOptions(decimal: true)
                       : TextInputType.number,
                   inputFormatters: [
                     if (step == 0) UpperCaseTextFormatter(),

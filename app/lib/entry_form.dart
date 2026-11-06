@@ -100,7 +100,7 @@ class _EntryDialogState extends State<EntryDialog> {
           return 'Informe um valor maior que zero.';
         }
       } catch (_) {
-        return 'Use vírgula para os centavos. Exemplo: 1.250,50.';
+        return 'Informe o valor com vírgula ou ponto nos centavos: 78,50 ou 78.50.';
       }
     }
     if (f.document != null && value.isNotEmpty) {
@@ -116,6 +116,11 @@ class _EntryDialogState extends State<EntryDialog> {
       if (count == null || count < 1 || count > 120) {
         return 'Escolha de 1 a 120 parcelas.';
       }
+    }
+    if (f.keyName == 'lastFour' &&
+        value.isNotEmpty &&
+        !RegExp(r'^\d{4}$').hasMatch(value)) {
+      return 'Informe exatamente os quatro últimos dígitos.';
     }
     if (f.keyName.endsWith('Rate')) {
       final rate = double.tryParse(value.replaceAll(',', '.'));
@@ -218,10 +223,14 @@ class _EntryDialogState extends State<EntryDialog> {
       autofocus: index == 0,
       obscureText: f.secret,
       keyboardType: f.money
-          ? const TextInputType.numberWithOptions(decimal: true, signed: true)
+          ? TextInputType.numberWithOptions(
+              decimal: true,
+              signed: f.keyName == 'opening',
+            )
           : f.date ||
                 f.secret ||
                 f.keyName == 'installments' ||
+                f.keyName == 'lastFour' ||
                 f.keyName.endsWith('Rate')
           ? TextInputType.number
           : TextInputType.text,
@@ -249,10 +258,16 @@ class _EntryDialogState extends State<EntryDialog> {
         if (f.date) FriendlyInputFormatter('date'),
         if (f.document != null) FriendlyInputFormatter(f.document!),
         if (f.keyName == 'installments') FilteringTextInputFormatter.digitsOnly,
+        if (f.keyName == 'lastFour') FilteringTextInputFormatter.digitsOnly,
+        if (f.keyName == 'lastFour') LengthLimitingTextInputFormatter(4),
         if (f.secret) FilteringTextInputFormatter.digitsOnly,
         if (f.secret) LengthLimitingTextInputFormatter(12),
       ],
-      maxLength: f.money || f.date || f.document != null ? null : 500,
+      maxLength: f.keyName == 'lastFour'
+          ? 4
+          : f.money || f.date || f.document != null
+          ? null
+          : 500,
       decoration: InputDecoration(
         labelText: label,
         hintText:
@@ -279,6 +294,26 @@ class _EntryDialogState extends State<EntryDialog> {
                 tooltip: 'Escolher data no calendário',
                 onPressed: busy ? null : () => pickDate(f),
                 icon: const Icon(Icons.calendar_month_outlined),
+              )
+            : f.money
+            ? IconButton(
+                tooltip: 'Inserir vírgula dos centavos',
+                onPressed: busy
+                    ? null
+                    : () {
+                        final text = controller.text;
+                        if (text.contains(',')) return;
+                        controller.text = '$text,';
+                        controller.selection = TextSelection.collapsed(
+                          offset: controller.text.length,
+                        );
+                        focusNodes[f.keyName]!.requestFocus();
+                        setState(() {});
+                      },
+                icon: const Text(
+                  ',',
+                  style: TextStyle(fontSize: 30, fontWeight: FontWeight.bold),
+                ),
               )
             : null,
       ),
