@@ -9,6 +9,9 @@ const apiBase = String.fromEnvironment(
   'API_URL',
   defaultValue: 'http://127.0.0.1:5187',
 );
+const hostedWebApi = String.fromEnvironment('WEB_API_URL');
+String get financeServiceOrigin =>
+    kIsWeb ? (hostedWebApi.isEmpty ? Uri.base.origin : hostedWebApi) : apiBase;
 String money(num cents) =>
     NumberFormat.currency(locale: 'pt_BR', symbol: 'R\$').format(cents / 100);
 String iso(DateTime d) => DateFormat('yyyy-MM-dd').format(d);
@@ -50,7 +53,10 @@ List<int> scheduledAmounts(int amount, int count, {bool repeatEach = false}) {
 }
 
 bool repeatsEachTitle(String mode) =>
-    mode == 'monthly_repeat' || mode == 'weekly' || mode == 'custom';
+    mode == 'monthly_repeat' ||
+    mode == 'yearly_repeat' ||
+    mode == 'weekly' ||
+    mode == 'custom';
 
 int generatedSeriesTotal(int amount, int count, String mode) =>
     repeatsEachTitle(mode) ? amount * count : amount;
@@ -67,8 +73,17 @@ bool? selectAllState(Set<int> selectable, Set<int> selected) {
   return null;
 }
 
-List<String> scheduledDues(String firstDue, int count, {int intervalDays = 0}) {
-  if (count < 1 || intervalDays < 0 || intervalDays > 365) {
+List<String> scheduledDues(
+  String firstDue,
+  int count, {
+  int intervalDays = 0,
+  int intervalMonths = 1,
+}) {
+  if (count < 1 ||
+      intervalDays < 0 ||
+      intervalDays > 365 ||
+      ![1, 12].contains(intervalMonths) ||
+      (intervalDays > 0 && intervalMonths != 1)) {
     throw const FormatException('Configuração de repetição inválida.');
   }
   final first = DateTime.parse(firstDue);
@@ -76,7 +91,7 @@ List<String> scheduledDues(String firstDue, int count, {int intervalDays = 0}) {
     if (intervalDays > 0) {
       return iso(first.add(Duration(days: i * intervalDays)));
     }
-    final month = DateTime(first.year, first.month + i, 1);
+    final month = DateTime(first.year, first.month + i * intervalMonths, 1);
     final lastDay = DateTime(month.year, month.month + 1, 0).day;
     return iso(
       DateTime(
@@ -90,7 +105,9 @@ List<String> scheduledDues(String firstDue, int count, {int intervalDays = 0}) {
 
 String status(RecordData t) {
   if (t['cancelled'] == 1) return 'Cancelado';
-  if (t['remaining'] == 0) return 'Pago';
+  if (t['remaining'] == 0) {
+    return t['kind'] == 'receivable' ? 'Recebido' : 'Pago';
+  }
   if ((t['due'] as String).compareTo(iso(DateTime.now())) < 0) return 'Vencido';
   if (t['settled'] > 0) return 'Parcial';
   return 'Em aberto';
@@ -132,10 +149,11 @@ String historyText(
       case 'Lançamento':
         final count = d['Installments'] as int? ?? 1;
         final weekly = (d['InstallmentIntervalDays'] as int? ?? 0) == 7;
+        final yearly = (d['InstallmentIntervalMonths'] as int? ?? 1) == 12;
         return '${d['Kind'] == 'payable' ? 'Conta a pagar' : 'Conta a receber'} "${d['Description']}" criada no valor ${count > 1 ? 'total ' : ''}de ${money(d['Amount'])}. ${count > 1
             ? weekly
                   ? '$count lançamentos a cada 7 dias, com primeiro vencimento'
-                  : '$count parcelas mensais, com primeiro vencimento'
+                  : '$count parcelas ${yearly ? 'anuais' : 'mensais'}, com primeiro vencimento'
             : 'Vencimento'} em ${dateLabel(d['Due'])}.';
       case 'Baixa':
         final input = Map<String, dynamic>.from(d['input']);
@@ -159,7 +177,7 @@ String historyText(
         final label = settlement == null
             ? 'lançamento'
             : title(settlement['titleId']);
-        return 'A baixa de "$label" foi desfeita e o movimento da conta foi revertido. Motivo: ${d['reason']}';
+        return 'A baixa de "$label" foi desfeita e ${d['adjustBalance'] == false ? 'o saldo da conta foi mantido' : 'o movimento da conta foi revertido'}. Motivo: ${d['reason']}';
       case 'Cancelamento':
         return 'O lançamento "${title(d['titleId'])}" foi cancelado e deixou de fazer parte dos valores em aberto. Motivo: ${d['reason']}';
       case 'Edição':
@@ -189,9 +207,10 @@ String historyText(
 class FinanceApi {
   final http.Client client = http.Client();
   String? token;
+  VoidCallback? onUnauthorized;
   FinanceApi({this.token});
   Future<dynamic> request(String path, [RecordData? data]) async {
-    final uri = Uri.parse('${kIsWeb ? Uri.base.origin : apiBase}/api$path');
+    final uri = Uri.parse('$financeServiceOrigin/api$path');
     final headers = <String, String>{
       if (data != null) 'Content-Type': 'application/json',
       if (token != null) 'Authorization': 'Bearer $token',
@@ -215,6 +234,7 @@ class FinanceApi {
       throw Exception('O serviço local devolveu uma resposta inválida.');
     }
     if (response.statusCode >= 400) {
+      if (response.statusCode == 401) onUnauthorized?.call();
       throw Exception(
         body is Map
             ? body['error'] ?? 'Operação recusada.'
@@ -223,4 +243,22 @@ class FinanceApi {
     }
     return body;
   }
+}
+
+// Open balances belong to the planned account; completed titles to actual settlements.
+bool titleMatchesAccount(
+  RecordData title,
+  Iterable<RecordData> settlements,
+  String account,
+) {
+  if (account.isEmpty) return true;
+  final actual = settlements
+      .where((s) => s['titleId'] == title['id'] && s['reversed'] != 1)
+      .toList();
+  if ((title['remaining'] as num) <= 0 && actual.isNotEmpty) {
+    return account != 'unassigned' &&
+        actual.any((s) => '${s['accountId']}' == account);
+  }
+  final planned = title['plannedAccountId'];
+  return account == 'unassigned' ? planned == null : '$planned' == account;
 }

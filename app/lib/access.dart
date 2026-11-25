@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'entry_form.dart';
 import 'finance.dart';
 import 'app_version.dart';
+import 'daily_session.dart';
 
 const _teal = Color(0xFF073F43);
 const _cream = Color(0xFFF7F2EA);
@@ -35,6 +38,9 @@ class _AccessGateState extends State<AccessGate> {
   bool busy = false;
   bool needsSetup = false;
   bool noLogin = false;
+  bool dailyLogin = false;
+  Timer? dailyTimer;
+  String? authenticatedDay;
   bool changingLicense = false;
   bool hidePin = true;
   bool darkMode = false;
@@ -50,11 +56,20 @@ class _AccessGateState extends State<AccessGate> {
   @override
   void initState() {
     super.initState();
+    api.onUnauthorized = expireDailyAccess;
+    dailyTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (dailyLogin &&
+          user != null &&
+          authenticatedDay != iso(DateTime.now())) {
+        expireDailyAccess();
+      }
+    });
     checkSetup();
   }
 
   @override
   void dispose() {
+    dailyTimer?.cancel();
     name.dispose();
     username.dispose();
     pin.dispose();
@@ -81,10 +96,42 @@ class _AccessGateState extends State<AccessGate> {
         return;
       }
       final result = await api.request('/auth/bootstrap');
+      dailyLogin = result['dailyLogin'] == true;
+      license['personalAccess'] = dailyLogin;
       if (result['noLogin'] == true) {
         noLogin = true;
         await enterLocalAccess();
         return;
+      }
+      noLogin = false;
+      if (dailyLogin && result['needsSetup'] != true) {
+        final savedToken = readDailySession();
+        if (savedToken != null) {
+          api.token = savedToken;
+          try {
+            final authenticated = RecordData.from(
+              await api.request('/auth/me'),
+            );
+            final available = (authenticated['companies'] as List)
+                .map((item) => RecordData.from(item))
+                .toList();
+            if (!mounted) return;
+            setState(() {
+              user = authenticated;
+              companies = available;
+              selectedCompany = available.length == 1
+                  ? available.first['id']
+                  : null;
+              authenticatedDay = iso(DateTime.now());
+              loading = false;
+              error = null;
+            });
+            return;
+          } catch (_) {
+            api.token = null;
+            writeDailySession(null);
+          }
+        }
       }
       if (mounted) {
         setState(() {
@@ -118,6 +165,20 @@ class _AccessGateState extends State<AccessGate> {
       loading = false;
       busy = false;
       error = null;
+    });
+  }
+
+  void expireDailyAccess() {
+    if (!dailyLogin || !mounted) return;
+    api.token = null;
+    writeDailySession(null);
+    setState(() {
+      user = null;
+      companies = [];
+      selectedCompany = null;
+      authenticatedDay = null;
+      pin.clear();
+      error = 'ENTRE COM SEU USUÁRIO E SENHA PARA CONTINUAR.';
     });
   }
 
@@ -251,6 +312,8 @@ class _AccessGateState extends State<AccessGate> {
         },
       );
       api.token = result['token'];
+      authenticatedDay = iso(DateTime.now());
+      if (dailyLogin) writeDailySession(api.token);
       final authenticated = RecordData.from(result['user']);
       final available = (authenticated['companies'] as List)
           .map((item) => RecordData.from(item))
@@ -275,6 +338,7 @@ class _AccessGateState extends State<AccessGate> {
   }
 
   Future<void> logout() async {
+    writeDailySession(null);
     try {
       await api.request('/auth/logout', {});
     } catch (error, stackTrace) {
@@ -666,7 +730,9 @@ class _AccessGateState extends State<AccessGate> {
                               const SizedBox(height: 18),
                               Text(
                                 creatingAdministrator
-                                    ? 'CRIAR ADMINISTRADOR GERAL'
+                                    ? (dailyLogin
+                                          ? 'CRIAR MEU ACESSO'
+                                          : 'CRIAR ADMINISTRADOR GERAL')
                                     : 'ENTRAR NO FINANCEIRO',
                                 textAlign: TextAlign.center,
                                 style: const TextStyle(
@@ -677,8 +743,12 @@ class _AccessGateState extends State<AccessGate> {
                               const SizedBox(height: 8),
                               Text(
                                 creatingAdministrator
-                                    ? 'ESTE SERÁ O ACESSO RESPONSÁVEL POR TODAS AS EMPRESAS E LOJAS DESTA INSTALAÇÃO.'
-                                    : 'USE SEU USUÁRIO E PIN PESSOAL.',
+                                    ? (dailyLogin
+                                          ? 'ESCOLHA SEU USUÁRIO E SENHA. SEUS LANÇAMENTOS E SALDOS SERÃO MANTIDOS.'
+                                          : 'ESTE SERÁ O ACESSO RESPONSÁVEL POR TODAS AS EMPRESAS E LOJAS DESTA INSTALAÇÃO.')
+                                    : (dailyLogin
+                                          ? 'ENTRE COM SEU USUÁRIO E SENHA. O ACESSO VALE ATÉ O FIM DO DIA.'
+                                          : 'USE SEU USUÁRIO E SENHA PESSOAL.'),
                                 textAlign: TextAlign.center,
                                 style: TextStyle(
                                   color: Theme.of(context)
@@ -716,18 +786,20 @@ class _AccessGateState extends State<AccessGate> {
                                         CrossAxisAlignment.stretch,
                                     children: [
                                       Text(
-                                        license['showcase'] == true
-                                            ? 'EDIÇÃO DE DEMONSTRAÇÃO • ACESSO LOCAL LIBERADO'
+                                        (license['showcase'] == true ||
+                                                license['independent'] == true)
+                                            ? 'ACESSO PESSOAL NESTE COMPUTADOR'
                                             : 'LICENÇA ATUAL: ${license['company'] ?? 'NÃO IDENTIFICADA'}',
                                         style: const TextStyle(
                                           fontSize: 11,
                                           fontWeight: FontWeight.w700,
                                         ),
                                       ),
-                                      if (license['showcase'] == true) ...[
+                                      if ((license['showcase'] == true ||
+                                          license['independent'] == true)) ...[
                                         const SizedBox(height: 6),
                                         Text(
-                                          'ESTA VERSÃO FOI PREPARADA PARA APRESENTAÇÕES E NÃO EXIGE CHAVE DE ATIVAÇÃO.',
+                                          'SEUS DADOS CONTINUAM SALVOS NESTA MÁQUINA.',
                                           style: TextStyle(
                                             color: Theme.of(context)
                                                 .colorScheme
@@ -752,6 +824,7 @@ class _AccessGateState extends State<AccessGate> {
                                         ),
                                       ],
                                       if (license['showcase'] != true &&
+                                          license['independent'] != true &&
                                           changingLicense) ...[
                                         const SizedBox(height: 12),
                                         TextField(
@@ -828,8 +901,9 @@ class _AccessGateState extends State<AccessGate> {
                                 onSubmitted: (_) => submit(),
                                 decoration: InputDecoration(
                                   labelText: creatingAdministrator
-                                      ? 'CRIE UM PIN'
-                                      : 'PIN DE ACESSO',
+                                      ? 'CRIE SUA SENHA NUMÉRICA'
+                                      : 'SENHA',
+                                  helperText: 'DE 6 A 12 NÚMEROS',
                                   prefixIcon: const Icon(Icons.pin_outlined),
                                   suffixIcon: IconButton(
                                     onPressed: () =>
@@ -854,7 +928,7 @@ class _AccessGateState extends State<AccessGate> {
                                   ],
                                   onSubmitted: (_) => submit(),
                                   decoration: const InputDecoration(
-                                    labelText: 'CONFIRME O PIN',
+                                    labelText: 'CONFIRME SUA SENHA',
                                     prefixIcon: Icon(
                                       Icons.verified_user_outlined,
                                     ),

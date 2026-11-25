@@ -56,22 +56,25 @@ sealed partial class Ledger
         long importId; if (existingImport is null) { Run(c, "INSERT INTO ofx_imports(companyId,accountId,fileName,fingerprint,bankId,periodStart,periodEnd) VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6)", company, x.AccountId, Required(x.FileName, "Nome do arquivo"), fingerprint, parsed.BankId, parsed.Start, parsed.End); importId = Number(Query(c, "SELECT last_insert_rowid() id")[0], "id"); } else importId = Number(existingImport, "id");
         Run(c, "UPDATE ofx_imports SET bankBalance=@p0,balanceDate=@p1 WHERE id=@p2", parsed.Balance, parsed.BalanceDate, importId);
         foreach (var item in debits) if (Query(c, "SELECT id FROM ofx_transactions WHERE companyId=@p0 AND accountId=@p1 AND fitId=@p2", company, x.AccountId, item.FitId).Count == 0) Run(c, "INSERT INTO ofx_transactions(importId,companyId,accountId,fitId,date,amount,memo,transactionType) VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7)", importId, company, x.AccountId, item.FitId, item.Date, item.Amount, item.Memo, item.Type);
-        var openTitles = Query(c, """SELECT t.id,t.kind,t.description,t.due,COALESCE(p.name,'SEM FORNECEDOR') partyName,t.amount-COALESCE((SELECT SUM(s.principal) FROM settlements s WHERE s.titleId=t.id AND s.reversed=0),0) remaining FROM titles t LEFT JOIN parties p ON p.id=t.partyId WHERE t.companyId=@p0 AND t.deleted=0 AND t.cancelled=0 AND t.amount>COALESCE((SELECT SUM(s.principal) FROM settlements s WHERE s.titleId=t.id AND s.reversed=0),0) ORDER BY t.due,t.id""", company);
         var rows = new List<object>(); var duplicates = 0; var suggested = 0;
         foreach (var parsedItem in debits)
         {
-            var stored = Query(c, "SELECT * FROM ofx_transactions WHERE companyId=@p0 AND accountId=@p1 AND fitId=@p2", company, x.AccountId, parsedItem.FitId)[0]; var reconciled = stored["settlementId"] is not null; var duplicate = reconciled; if (duplicate) duplicates++; var cash = Math.Abs(parsedItem.Amount); var kind = parsedItem.Amount < 0 ? "payable" : "receivable"; var words = MatchWords(parsedItem.Memo);
-            var ranked = openTitles.Where(t => (string)t["kind"]! == kind).Select(title => { var remaining = Number(title, "remaining"); var days = Math.Abs(Date((string)title["due"]!).DayNumber - Date(parsedItem.Date).DayNumber); var common = words.Intersect(MatchWords($"{title["description"]} {title["partyName"]}")).Count(); var exact = remaining == cash; var score = (exact ? 100 : Math.Abs(remaining - cash) <= Math.Max(100, cash / 100) ? 35 : 0) + (days <= 3 ? 25 : days <= 7 ? 15 : days <= 30 ? 5 : 0) + Math.Min(30, common * 10); return new { title, score, exact, days }; }).OrderByDescending(v => v.score).ThenBy(v => v.days).ToList();
-            var paidMatches = Query(c, """
-                SELECT s.id,t.description FROM settlements s JOIN titles t ON t.id=s.titleId
-                WHERE s.companyId=@p0 AND s.accountId=@p1 AND s.date=@p2 AND s.reversed=0 AND t.kind=@p3
-                  AND s.principal+s.interest+s.penalty+s.additional-s.discount=@p4
-                  AND NOT EXISTS(SELECT 1 FROM ofx_transactions o WHERE o.settlementId=s.id)
-                """, company, x.AccountId, parsedItem.Date, kind, cash)
-                .Where(t => MatchWords((string)t["description"]!).Intersect(words).Any()).ToList();
-            var existingSettlementId = paidMatches.Count == 1 ? (long?)Number(paidMatches[0], "id") : null;
-            var best = ranked.FirstOrDefault(); var recommend = !duplicate && best is not null && best.exact; if (recommend) suggested++;
-            rows.Add(new { id = Number(stored, "id"), date = parsedItem.Date, amount = cash, kind, future = Date(parsedItem.Date) > CreditCardToday(), existingSettlementId, existingSettlementDescription = existingSettlementId.HasValue ? paidMatches[0]["description"] : null, memo = parsedItem.Memo, duplicate, reconciled, suggestedTitleId = recommend ? (long?)Number(best!.title, "id") : null, suggestedDescription = recommend ? (string)best!.title["description"]! : "", suggestedParty = recommend ? (string)best!.title["partyName"]! : "", suggestedDue = recommend ? (string)best!.title["due"]! : "", suggestedRemaining = recommend ? Number(best!.title, "remaining") : 0 });
+            var stored = Query(c, "SELECT * FROM ofx_transactions WHERE companyId=@p0 AND accountId=@p1 AND fitId=@p2", company, x.AccountId, parsedItem.FitId)[0];
+            if (Number(stored,"amount")!=parsedItem.Amount || (string)stored["date"]! != parsedItem.Date) throw new ArgumentException("O mesmo identificador OFX contém data ou valor diferente. Confira o extrato.");
+            var fullCash=Math.Abs(parsedItem.Amount);var internalTransfer=IsCofrinhos(parsedItem.Memo);
+            var legacyTransfer=internalTransfer && stored["movementId"] is null && stored["settlementId"] is not null;
+            var covered=OfxCovered(c,Number(stored,"id"));if(covered>fullCash)throw new ArgumentException("A conciliação desta movimentação excede o valor do banco.");
+            var cash=legacyTransfer?fullCash:fullCash-covered;
+            var duplicate=stored["movementId"] is not null || (!legacyTransfer && cash==0);if(duplicate)duplicates++;
+            var kind=parsedItem.Amount<0?"payable":"receivable";
+            var match=duplicate?new OfxMatch([],null,false):FindOfxMatch(c,company,x.AccountId,kind,parsedItem.Date,cash,parsedItem.Memo);
+            var paid=match.Review?[]:match.Paid;var recommend=!duplicate && (paid.Count>0 || match.TitleId.HasValue);if(recommend)suggested++;
+            rows.Add(new { id=Number(stored,"id"),date=parsedItem.Date,amount=duplicate?fullCash:cash,bankAmount=fullCash,kind,memo=parsedItem.Memo,internalTransfer,reviewRequired=match.Review || (internalTransfer && match.Paid.Count>1),autoCreate=!duplicate&&!match.Review&&paid.Count==0&&!match.TitleId.HasValue,
+                future=Date(parsedItem.Date)>CreditCardToday(),duplicate,reconciled=duplicate,
+                existingSettlementId=paid.Count>0?(long?)Number(paid[0],"id"):null,existingSettlementIds=paid.Select(p=>Number(p,"id")).ToArray(),
+                existingSettlementDescription=paid.Count>1?$"VINCULAR {paid.Count} BAIXAS E CLASSIFICAR SOMENTE A DIFERENÇA":paid.Count==1?(string)paid[0]["description"]!:null,
+                existingSettlementChoices=match.Paid.Select(p=>new{id=Number(p,"id"),description=p["description"],date=p["date"],amount=SettlementCash(p)}).ToArray(),
+                suggestedTitleId=match.TitleId,suggestedDescription="",suggestedParty=OfxPartyName(parsedItem.Memo),suggestedDue="",suggestedRemaining=cash });
         }
         Audit(c, company, "Importação OFX", new { importId, file = x.FileName, accountId = x.AccountId, debits = debits.Count, duplicates, suggested }); return new { importId, fileName = x.FileName, accountId = x.AccountId, accountName = account["name"], bankId = parsed.BankId, periodStart = parsed.Start, periodEnd = parsed.End, bankBalance = parsed.Balance, balanceDate = parsed.BalanceDate, currentBalance = Number(account, "opening") + Query(c, "SELECT COALESCE(SUM(amount),0) total FROM movements WHERE accountId=@p0", x.AccountId).Sum(r => Number(r, "total")), total = debits.Count, duplicates, suggested, transactions = rows };
     });
@@ -86,40 +89,61 @@ sealed partial class Ledger
         {
             // Um FITID pode reaparecer em arquivos de períodos sobrepostos.
             var transaction = Query(c, "SELECT * FROM ofx_transactions WHERE id=@p0 AND companyId=@p1 AND accountId=@p2", item.TransactionId, company, accountId).SingleOrDefault() ?? throw new ArgumentException("Movimentação não pertence à conta.");
-            if (transaction["settlementId"] is not null) throw new ArgumentException("Movimentação já conciliada.");
-            var date = (string)transaction["date"]!;
-            if (Date(date) > CreditCardToday()) throw new ArgumentException("Movimentações futuras devem aguardar a data de realização.");
-            var signedAmount = Number(transaction, "amount"); var cash = Math.Abs(signedAmount); var kind = signedAmount < 0 ? "payable" : "receivable";
-            long settlementId;
-            if (item.ExistingSettlementId.HasValue)
+            var date=(string)transaction["date"]!;
+            if(Date(date)>CreditCardToday())throw new ArgumentException("Movimentações futuras devem aguardar a data de realização.");
+            var signedAmount=Number(transaction,"amount");var fullCash=Math.Abs(signedAmount);var tid=Number(transaction,"id");
+            var internalTransfer=IsCofrinhos((string)transaction["memo"]!);
+            var legacyTransfer=internalTransfer && transaction["movementId"] is null && transaction["settlementId"] is not null;
+            var cash=fullCash-OfxCovered(c,tid);
+            if(transaction["movementId"] is not null || (!legacyTransfer && cash<=0))throw new ArgumentException("Movimentação já conciliada.");
+            if(internalTransfer){var existing=FindOfxMatch(c,company,accountId,kind:signedAmount<0?"payable":"receivable",date:date,cash:fullCash,memo:(string)transaction["memo"]!);if(existing.Review || existing.Paid.Count>1)throw new ArgumentException("Confira as transferências semelhantes de cofrinhos antes de confirmar.");RecordOfxTransfer(c,company,accountId,transaction);total=checked(total+signedAmount);continue;}
+            var kind=signedAmount<0?"payable":"receivable";
+            var match=FindOfxMatch(c,company,accountId,kind,date,cash,(string)transaction["memo"]!);
+            var ids=item.ExistingSettlementIds is { Length:>0 }?item.ExistingSettlementIds:item.ExistingSettlementId.HasValue?(!match.Review && match.Paid.Count>1 && match.Paid.Any(p=>Number(p,"id")==item.ExistingSettlementId.Value)?match.Paid.Select(p=>Number(p,"id")).ToArray():new[]{item.ExistingSettlementId.Value}):item.Create&&!item.ConfirmNew&&!match.Review?match.Paid.Select(p=>Number(p,"id")).ToArray():Array.Empty<long>();
+            if(ids.Distinct().Count()!=ids.Length)throw new ArgumentException("Há baixas repetidas na seleção.");
+            if(item.Create && !item.ConfirmNew && match.Review && ids.Length==0)throw new ArgumentException("Há baixas ou parcelas semelhantes. Escolha a correspondência antes de criar outro lançamento.");
+            if(item.ConfirmNew)Audit(c,company,"Criação OFX confirmada",new{transactionId=tid,reason="USUÁRIO CONFIRMOU QUE É OUTRO PAGAMENTO"});
+            var retained=OfxRetained(c,transaction);
+            if(ids.Length>0 && retained.Length>0)throw new ArgumentException("Há saldo preservado de um estorno. Escolha a parcela em aberto para reaproveitar esse movimento.");
+            long linkedCash=0;
+            foreach(var sid in ids)
             {
-                var paid = Query(c, """
-                    SELECT s.id FROM settlements s JOIN titles t ON t.id=s.titleId
-                    WHERE s.id=@p0 AND s.companyId=@p1 AND s.accountId=@p2 AND s.date=@p3 AND s.reversed=0 AND t.kind=@p4
-                      AND s.principal+s.interest+s.penalty+s.additional-s.discount=@p5
-                      AND NOT EXISTS(SELECT 1 FROM ofx_transactions o WHERE o.settlementId=s.id)
-                    """, item.ExistingSettlementId.Value, company, accountId, date, kind, cash).SingleOrDefault()
-                    ?? throw new ArgumentException("A baixa existente não corresponde à movimentação.");
-                settlementId = Number(paid, "id");
+                var paid=Query(c,"SELECT s.*,t.kind,t.description,COALESCE(p.name,'') partyName FROM settlements s JOIN titles t ON t.id=s.titleId LEFT JOIN parties p ON p.id=t.partyId WHERE s.id=@p0 AND s.companyId=@p1 AND s.accountId=@p2 AND s.reversed=0 AND t.deleted=0 AND t.cancelled=0 AND t.kind=@p3 AND NOT EXISTS(SELECT 1 FROM ofx_allocations a WHERE a.settlementId=s.id) AND NOT EXISTS(SELECT 1 FROM ofx_transactions o WHERE o.settlementId=s.id)",sid,company,accountId,kind).SingleOrDefault()??throw new ArgumentException("A baixa selecionada já foi vinculada ou não pertence à conta.");
+                if(Math.Abs(Date((string)paid["date"]!).DayNumber-Date(date).DayNumber)>31 || (!OfxNameMatches((string)transaction["memo"]!,$"{paid["description"]} {paid["partyName"]}") && OfxCardMatch(c,company,(string)transaction["memo"]!,Number(paid,"titleId"))<0))throw new ArgumentException("Confira a data e a descrição da baixa existente.");
+                var amount=SettlementCash(paid);linkedCash=checked(linkedCash+amount);if(linkedCash>cash)throw new ArgumentException("As baixas selecionadas excedem o valor do banco.");
+                if((string)paid["date"]! != date){Run(c,"UPDATE settlements SET date=@p0 WHERE id=@p1",date,sid);Run(c,"UPDATE movements SET date=@p0 WHERE settlementId=@p1 AND date=@p2",date,sid,paid["date"]);Audit(c,company,"Correção de data da baixa",new{settlementId=sid,previousDate=paid["date"],date,reason="DATA CONFERIDA NO OFX"});}
+                LinkOfx(c,tid,sid,amount);settlementIds.Add(sid);
             }
-            else
+            var remaining=cash-linkedCash;
+            if(remaining>0)
             {
-                var titleId = item.TitleId;
-                if (item.Create)
+                var titleId=item.TitleId;
+                if(titleId==0 && item.Create && !item.ConfirmNew && linkedCash==0 && match.TitleId.HasValue)titleId=checked((int)match.TitleId.Value);
+                if(titleId==0)
                 {
-                    var description = Required(string.IsNullOrWhiteSpace(item.Description) ? (string)transaction["memo"]! : item.Description, "Descrição");
-                    var category = Required(string.IsNullOrWhiteSpace(item.Category) ? (kind == "payable" ? "DESPESAS BANCÁRIAS A CLASSIFICAR" : "RECEITAS BANCÁRIAS A CLASSIFICAR") : item.Category, "Plano de contas");
-                    Run(c, "INSERT OR IGNORE INTO plans(companyId,name,kind) VALUES(@p0,@p1,@p2)", company, category, kind);
-                    Run(c, "INSERT INTO titles(companyId,kind,description,amount,due,category,notes,documentNumber,issueDate) VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7,@p4)", company, kind, description, cash, date, category, "CRIADO NA CONCILIAÇÃO OFX", transaction["fitId"]);
-                    titleId = Convert.ToInt32(Number(Query(c, "SELECT last_insert_rowid() id")[0], "id"));
+                    if(!item.Create && ids.Length==0)throw new ArgumentException("Selecione a parcela ou a criação do lançamento.");
+                    var description=Required(string.IsNullOrWhiteSpace(item.Description)?(string)transaction["memo"]!+(linkedCash>0?" - DIFERENÇA A CLASSIFICAR":""):item.Description,"Descrição");
+                    var category=Required(string.IsNullOrWhiteSpace(item.Category)?(kind=="payable"?"DESPESAS BANCÁRIAS A CLASSIFICAR":"RECEITAS BANCÁRIAS A CLASSIFICAR"):item.Category,"Plano de contas");
+                    Run(c,"INSERT OR IGNORE INTO plans(companyId,name,kind) VALUES(@p0,@p1,@p2)",company,category,kind);
+                    Run(c,"INSERT INTO titles(companyId,kind,description,amount,due,category,notes,documentNumber,issueDate) VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7,@p4)",company,kind,description,remaining,date,category,"CRIADO NA CONCILIAÇÃO OFX; DIFERENÇA NÃO IDENTIFICADA AUTOMATICAMENTE",transaction["fitId"]);
+                    titleId=checked((int)Number(Query(c,"SELECT last_insert_rowid() id")[0],"id"));
+                    Run(c,"UPDATE titles SET plannedAccountId=@p0,partyId=@p2 WHERE id=@p1",accountId,titleId,ResolveOfxParty(c,company,kind,item.PartyName ?? OfxPartyName((string)transaction["memo"]!)));
                 }
-                var title = Query(c, TitlesSql, company).SingleOrDefault(t => Number(t, "id") == titleId) ?? throw new ArgumentException("Lançamento não encontrado.");
-                if ((string)title["kind"]! != kind || Number(title, "cancelled") != 0 || Number(title, "remaining") <= 0) throw new ArgumentException("Selecione um lançamento em aberto do mesmo tipo.");
-                var principal = Math.Min(cash, Number(title, "remaining"));
-                settlementId = SettleCore(c, company, titleId, new(accountId, principal, 0, 0, 0, date, Math.Max(0, cash - principal)));
+                var title=Query(c,TitlesSql,company).SingleOrDefault(t=>Number(t,"id")==titleId)??throw new ArgumentException("Lançamento não encontrado.");
+                if(title["partyId"] is null)
+                {
+                    var partyId=ResolveOfxParty(c,company,kind,item.PartyName ?? OfxPartyName((string)transaction["memo"]!));
+                    if(partyId.HasValue)Run(c,"UPDATE titles SET partyId=@p0 WHERE id=@p1",partyId.Value,titleId);
+                }
+                if((string)title["kind"]! != kind || Number(title,"cancelled")!=0 || Number(title,"remaining")<=0)throw new ArgumentException("Selecione um lançamento em aberto do mesmo tipo.");
+                var principal=Math.Min(remaining,Number(title,"remaining"));
+                var sid=SettleCore(c,company,titleId,new(accountId,principal,0,0,0,date,Math.Max(0,remaining-principal)),retainedSettlementIds:retained);
+                Run(c,"UPDATE ofx_allocations SET retained=0 WHERE transactionId=@p0",tid);
+                LinkOfx(c,tid,sid,remaining);settlementIds.Add(sid);
             }
-            Run(c, "UPDATE ofx_transactions SET settlementId=@p0 WHERE id=@p1", settlementId, item.TransactionId);
-            settlementIds.Add(settlementId); total = checked(total + signedAmount);
+            if(OfxCovered(c,tid)!=fullCash)throw new ArgumentException("O rateio não fecha com o valor da movimentação bancária.");
+            Audit(c,company,"Rateio do pagamento OFX",new{fitId=transaction["fitId"],bankAmount=fullCash,allocations=Query(c,"SELECT a.settlementId,a.cash AS amount FROM ofx_allocations a JOIN settlements s ON s.id=a.settlementId WHERE a.transactionId=@p0 AND s.reversed=0",tid)});
+            total = checked(total + signedAmount);
         }
         long balanceAdjustment = 0;
         if (x.UpdateBalance)

@@ -1,6 +1,18 @@
 # Monalisa Financeiro
 
-Versão atual: **1.1.25**.
+Versão atual: **1.1.38**.
+
+A conciliação OFX prepara automaticamente vínculos com baixas existentes (inclusive data próxima e nomes equivalentes), parcelas em aberto e novos lançamentos. Um PIX pode aproveitar várias parcelas já pagas e registrar somente a diferença, sem presumir a finalidade dessa diferença. Valores ambíguos exigem escolha ou confirmação explícita de que é outro pagamento. Aplicações e resgates identificados como COFRINHOS são movimentos de transferência, sem receita/despesa, e não criam títulos. FITIDs e rateios impedem reaproveitar a mesma baixa ou repetir movimentações em arquivos sobrepostos. Estornos parciais de rateio reabrem somente o valor correspondente e permitem reaproveitar movimentos preservados. O saldo do banco vem marcado para conciliação quando há movimentos novos e data válida; reimportar um arquivo todo conciliado não remarca esse ajuste. Antes de gravar, o usuário confere e confirma o extrato. Contas a receber liquidadas usam o status RECEBIDO.
+
+O botão **CONCILIAR EXTRATO OFX** fica centralizado nas telas de contas a pagar e a receber. O botão de Open Finance foi retirado dessas telas.
+
+O modo pessoal pode exigir login diário com `MONALISA_REQUIRE_DAILY_LOGIN=1` (arquivo local `daily-login.txt` com valor `1`). O acesso automático fica bloqueado. Se só houver o usuário automático LOCAL, o primeiro acesso permite cadastrar o responsável sem modificar o banco financeiro. A senha numérica mantém a proteção PBKDF2 e o bloqueio de tentativas do sistema. O navegador guarda somente o token de sessão; o servidor o valida e o expira à meia-noite, sem renovação por atividade. Sair revoga a sessão; reiniciar o serviço exige novo login. O selo de demonstração foi retirado da interface.
+
+O acesso pessoal por endereço fixo usa uma compilação web com `WEB_API_URL=http://127.0.0.1:5187`. Somente a interface fica hospedada no Site privado: o banco e a API continuam neste computador. O serviço aceita o endereço HTTPS exato definido em `MONALISA_WEB_ORIGIN` apenas por conexões de loopback; outras origens continuam bloqueadas. Na instalação local, a configuração fica em `trusted-web-origin.txt`. O navegador pode solicitar permissão de acesso à rede local. Este modo não permite acessar os dados deste computador pelo celular ou por outra máquina.
+
+Ao estornar uma baixa, escolha se o saldo da conta deve ser atualizado. **NÃO — DESFAZER A BAIXA E MANTER O SALDO** reabre a parcela e preserva o movimento bancário, registrando a escolha e o motivo no histórico. Para baixas conciliadas por OFX, reimporte o extrato e escolha a parcela correta: o movimento preservado será reaproveitado, sem duplicar a movimentação do saldo. O estorno padrão continua revertendo o saldo. A conciliação agora exige valor, descrição, proximidade do vencimento e ausência de empate para sugerir uma parcela; confira o vencimento exibido na seleção. Operações anteriores à atualização não são modificadas automaticamente.
+
+A aba **RELATÓRIOS** reúne o relatório financeiro por período, os oito relatórios mensais de contas a pagar e a receber e os cinco relatórios detalhados. **VISUALIZAR RELATÓRIO** abre o PDF em outra aba sem baixar primeiro; **BAIXAR PDF** salva o arquivo. Os relatórios mensais usam o mês de referência escolhido na própria aba. Os relatórios detalhados continuam permitindo exportação CSV.
 
 O repositório contém o código-fonte público. Bancos, backups, extratos bancários, credenciais de integrações, chaves privadas e verificadores de senhas de instalações não fazem parte da distribuição. O Painel Central compila sem acessos configurados; para uso próprio, gere uma chave privada de suporte e a tabela local com `support/GerarTabelaSenhasMestras.ps1`. Nunca publique esses arquivos.
 
@@ -83,3 +95,29 @@ O servidor central mantém a chave privada em `.private-license/license-signing-
 O esquema 2 adiciona vínculo explícito, número e quantidade de parcelas. Há backup automático antes da migração de um banco com títulos. Parcelamentos antigos são vinculados apenas quando o histórico de criação identifica cada parcela sem ambiguidade (empresa, tipo, descrição, data, valor, pessoa, categoria, observação e momento da criação). Casos ambíguos permanecem independentes para evitar cancelamento indevido. O cancelamento em conjunto ocorre em uma transação e registra uma entrada de histórico por título cancelado.
 
 `test-migration.ps1 -LegacyDll <binário anterior> -NewDll <binário atual>` permite verificar a migração usando banco descartável. A arte e o prompt de edição estão em `app/assets/monalisa-transparent.md`.
+
+## VERSÃO 1.1.33 — CONTAS FINANCEIRAS
+
+A pagar e A receber possuem filtro por conta e opção CONTA NÃO DEFINIDA. Cada lançamento pode informar a conta financeira prevista. A baixa sugere essa conta e permite trocar a conta efetiva. O total em aberto acompanha o filtro; títulos liquidados são localizados pelas contas das baixas ativas. A migração 23 preserva saldos e identifica contas antigas apenas por vínculos inequívocos. Parcelas, duplicações, faturas e lançamentos criados por OFX mantêm a conta correspondente.
+
+
+## VERSÃO 1.1.34 — CADASTRO RÁPIDO E NOMES DO OFX
+
+Despesas e recebimentos permitem criar e selecionar fornecedor/cliente sem perder o lançamento em edição. A criação rápida também está disponível na confirmação da conversa da visão geral. A conciliação sugere nomes explícitos de PIX e TED, permite revisar ou limpar o nome e cria o cadastro somente ao confirmar. Créditos criam clientes e débitos criam fornecedores. Nomes exatos já cadastrados são reaproveitados; ambiguidades exigem revisão. Cofrinhos e descrições genéricas não geram cadastros. O acesso móvel local utiliza o endereço de rede do computador, mantendo login diário e o banco do servidor.
+
+
+## VERSÃO 1.1.35 — VERIFICAÇÃO DE ATUALIZAÇÕES
+
+As instalações independentes verificam atualizações a cada 5 minutos. O download continua validado por assinatura e hash, e a aplicação ocorre no próximo início com backup, sem interromper o serviço em uso.
+
+## VERSÃO 1.1.36 — REPETIÇÃO ANUAL
+
+A pagar e A receber oferecem REPETIR O MESMO VALOR TODO ANO. O usuário informa o valor por ano, a quantidade de lançamentos e o primeiro vencimento, confere a prévia e pode ajustar cada parcela. A edição em conjunto preserva a periodicidade anual. Vencimentos respeitam o calendário, incluindo 29 de fevereiro. As baixas permanecem manuais. A migração 24 adiciona a periodicidade sem alterar valores, saldos ou lançamentos existentes e cria backup antes da mudança.
+
+## VERSÃO 1.1.37 — COBRANÇAS ANUAIS NO CARTÃO
+
+Ao lançar uma compra no cartão, o usuário pode repetir o valor integral por uma quantidade de anos ou criar recorrência anual até encerrar. A fatura respeita o fechamento do cartão. A recorrência gera somente os ciclos necessários, preserva exclusões de ocorrências e permite encerramento. A prévia distingue valor total dividido de cobrança repetida. A migração 25 preserva as recorrências mensais existentes e adiciona a periodicidade anual.
+
+## VERSÃO 1.1.38 — NAVEGAÇÃO DE MESES
+
+A pagar e A receber usam um seletor de período abaixo dos lançamentos, com os 12 meses do ano, navegação para anos anteriores e seguintes, escolha direta do ano e atalho MÊS ATUAL. Os meses históricos não dependem da existência de contas em aberto. Os filtros atuais são preservados e um aviso orienta usar situação TODOS para incluir baixas antigas. A seleção de parcelas é limpa ao mudar o período.

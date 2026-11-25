@@ -6,7 +6,7 @@ using System.Text;
 using System.Text.Json;
 
 record LicenseActivationInput(string ActivationKey);
-record LicenseSnapshot(string Status,string Message,string Company,string Cnpj,string ValidUntil,bool Offline,bool Configured,bool NetworkConfigured=false,bool RestartRequired=false,bool IsSecondary=false,string NetworkMode="standalone",bool Showcase=false);
+record LicenseSnapshot(string Status,string Message,string Company,string Cnpj,string ValidUntil,bool Offline,bool Configured,bool NetworkConfigured=false,bool RestartRequired=false,bool IsSecondary=false,string NetworkMode="standalone",bool Showcase=false,bool Independent=false);
 record StoredLicense(string InstallationId,string ProtectedKey,string Token,string LastCheck);
 record RemoteLicenseResponse(string Token);
 record SignedLicensePayload(int LicenseId,string Company,string Cnpj,string InstallationId,string Status,string Message,string CheckedAt,string ValidUntil);
@@ -44,6 +44,7 @@ sealed class LicenseGuard {
     }
 
     public async Task<LicenseSnapshot> Status(bool force=false) {
+        if(Environment.GetEnvironmentVariable("MONALISA_INDEPENDENT")=="1")return new("active","INSTALAÇÃO INDEPENDENTE","","",DateTime.UtcNow.AddYears(10).ToString("O"),false,true,Independent:true);
         if(Environment.GetEnvironmentVariable("MONALISA_SHOWCASE")=="1")return WithCurrentNetwork(new("active","EDIÇÃO DE DEMONSTRAÇÃO","MERCADO DEMONSTRAÇÃO","00000000000191",DateTime.UtcNow.AddYears(10).ToString("O"),false,true,Showcase:true));
 #if DEBUG
         if(Environment.GetEnvironmentVariable("MONALISA_LICENSE_DISABLED")=="1")return WithCurrentNetwork(new("active","MODO LOCAL DE DESENVOLVIMENTO","DESENVOLVIMENTO","",DateTime.UtcNow.AddDays(1).ToString("O"),false,true));

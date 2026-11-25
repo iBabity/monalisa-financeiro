@@ -14,7 +14,9 @@ builder.Services.AddSingleton<AuthSessions>();
 builder.Services.AddSingleton<LicenseGuard>();
 builder.Services.AddSingleton<PluggySandbox>();
 var app = builder.Build();
-var localNoLogin = Environment.GetEnvironmentVariable("MONALISA_NO_LOGIN") == "1";
+var dailyLogin = Environment.GetEnvironmentVariable("MONALISA_REQUIRE_DAILY_LOGIN") == "1";
+var localNoLogin = !dailyLogin && Environment.GetEnvironmentVariable("MONALISA_NO_LOGIN") == "1";
+var trustedWebOrigin = (Environment.GetEnvironmentVariable("MONALISA_WEB_ORIGIN") ?? "").TrimEnd('/');
 var networkRole = (Environment.GetEnvironmentVariable("MONALISA_NETWORK_ROLE") ?? "standalone").Trim().ToLowerInvariant();
 var dataServerUrl = (Environment.GetEnvironmentVariable("MONALISA_DATA_SERVER_URL") ?? "").Trim().TrimEnd('/');
 var networkKey = (Environment.GetEnvironmentVariable("MONALISA_NETWORK_KEY") ?? "").Trim();
@@ -28,7 +30,21 @@ app.Use(async (ctx, next) =>
 {
     var origin = ctx.Request.Headers.Origin.ToString();
     var localOrigin = $"{ctx.Request.Scheme}://{ctx.Request.Host}";
-    if (origin.Length > 0 && !string.Equals(origin, localOrigin, StringComparison.OrdinalIgnoreCase)) { ctx.Response.StatusCode = 403; return; }
+    if (origin.Length > 0 && !string.Equals(origin, localOrigin, StringComparison.OrdinalIgnoreCase))
+    {
+        // The hosted personal interface talks directly to this PC, never through a cloud proxy.
+        var trustedLocalClient = trustedWebOrigin.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(origin, trustedWebOrigin, StringComparison.OrdinalIgnoreCase)
+            && ctx.Connection.RemoteIpAddress is { } remote && IPAddress.IsLoopback(remote)
+            && ctx.Request.Path.StartsWithSegments("/api");
+        if (!trustedLocalClient) { ctx.Response.StatusCode = 403; return; }
+        ctx.Response.Headers.AccessControlAllowOrigin = trustedWebOrigin;
+        ctx.Response.Headers.Vary = "Origin";
+        ctx.Response.Headers.AccessControlAllowMethods = "GET, POST, OPTIONS";
+        ctx.Response.Headers.AccessControlAllowHeaders = "Authorization, Content-Type";
+        ctx.Response.Headers["Access-Control-Allow-Private-Network"] = "true";
+        if (HttpMethods.IsOptions(ctx.Request.Method)) { ctx.Response.StatusCode = 204; return; }
+    }
     try { await next(); }
     catch (ArgumentException ex) { ctx.Response.StatusCode = 400; await ctx.Response.WriteAsJsonAsync(new { error = ex.Message }); }
     catch (SqliteException ex) when (ex.SqliteErrorCode == 19) { ctx.Response.StatusCode = 409; await ctx.Response.WriteAsJsonAsync(new { error = "Registro duplicado ou referência inválida." }); }
@@ -123,10 +139,11 @@ app.MapGet("/api/license/status", async (LicenseGuard license, Ledger db) => { v
 app.MapPost("/api/license/activate", async (LicenseActivationInput x, LicenseGuard license, Ledger db) => { var result = await license.Activate(x.ActivationKey); db.ApplyLicensedCompany(result); return result; });
 app.MapPost("/api/license/change", async (LicenseActivationInput x, LicenseGuard license, Ledger db) => { var result = await license.Change(x.ActivationKey); db.ApplyLicensedCompany(result); return result; });
 app.MapPost("/api/license/refresh", async (LicenseGuard license, Ledger db) => { var result = await license.Status(true); db.ApplyLicensedCompany(result); return result; });
-app.MapGet("/api/auth/bootstrap", (Ledger db) => new { needsSetup = !localNoLogin && !db.HasUsers(), noLogin = localNoLogin });
-app.MapPost("/api/auth/bootstrap", (BootstrapInput x, Ledger db, AuthSessions sessions) =>
+app.MapGet("/api/auth/bootstrap", (Ledger db) => new { needsSetup = !localNoLogin && (!db.HasUsers() || (dailyLogin && !db.HasInteractiveUsers())), noLogin = localNoLogin, dailyLogin });
+app.MapPost("/api/auth/bootstrap", (BootstrapInput x, HttpContext context, Ledger db, AuthSessions sessions) =>
 {
-    var user = db.SetupAdministrator(x); var token = sessions.Create(user); return new { token, user = db.AccessContext(user) };
+    if (dailyLogin && (context.Connection.RemoteIpAddress is not { } remote || !IPAddress.IsLoopback(remote))) throw new ArgumentException("Configure o acesso pessoal neste computador.");
+    var user = db.SetupAdministrator(x, dailyLogin); var token = sessions.Create(user); return new { token, user = db.AccessContext(user) };
 });
 app.MapPost("/api/auth/login", (LoginInput x, Ledger db, AuthSessions sessions) =>
 {
@@ -198,7 +215,7 @@ app.MapPost("/api/companies/{companyId:int}/titles", (int companyId, TitleInput 
 app.MapPost("/api/companies/{companyId:int}/titles/{id:int}/duplicate", (int companyId, int id, DuplicateInput x, Ledger db) => db.Duplicate(companyId, id, x));
 app.MapPost("/api/companies/{companyId:int}/titles/{id:int}/settle", (int companyId, int id, SettlementInput x, Ledger db) => db.Settle(companyId, id, x));
 app.MapPost("/api/companies/{companyId:int}/settlements/bulk", (int companyId, BulkSettlementInput x, Ledger db) => db.BulkSettle(companyId, x));
-app.MapPost("/api/companies/{companyId:int}/settlements/{id:int}/reverse", (int companyId, int id, ReasonInput x, Ledger db) => db.Reverse(companyId, id, x));
+app.MapPost("/api/companies/{companyId:int}/settlements/{id:int}/reverse", (int companyId, int id, ReverseInput x, Ledger db) => db.Reverse(companyId, id, x));
 app.MapPost("/api/companies/{companyId:int}/ofx/preview", (int companyId, OfxPreviewInput x, Ledger db) => db.PreviewOfx(companyId, x));
 app.MapPost("/api/companies/{companyId:int}/ofx/confirm", (int companyId, OfxConfirmInput x, Ledger db) => db.ConfirmOfx(companyId, x));
 app.MapPost("/api/companies/{companyId:int}/open-finance/sandbox/connect", async (int companyId, HttpContext ctx, Ledger db, PluggySandbox pluggy) =>

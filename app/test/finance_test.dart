@@ -2,6 +2,50 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:app/finance.dart';
 
 void main() {
+  test(
+    'repetição anual mantém valor integral e calendário inclusive ano bissexto',
+    () {
+      expect(repeatsEachTitle('yearly_repeat'), true);
+      expect(generatedSeriesTotal(15000, 3, 'yearly_repeat'), 45000);
+      expect(scheduledDues('2026-11-22', 3, intervalMonths: 12), [
+        '2026-11-22',
+        '2027-11-22',
+        '2028-11-22',
+      ]);
+      expect(scheduledDues('2024-02-29', 5, intervalMonths: 12), [
+        '2024-02-29',
+        '2025-02-28',
+        '2026-02-28',
+        '2027-02-28',
+        '2028-02-29',
+      ]);
+    },
+  );
+  test(
+    'filtro por conta usa previsão em aberto e baixas efetivas na liquidação',
+    () {
+      final title = <String, dynamic>{
+        'id': 1,
+        'remaining': 100,
+        'plannedAccountId': 10,
+      };
+      final paid = <Map<String, dynamic>>[
+        {'titleId': 1, 'accountId': 20, 'reversed': 0},
+        {'titleId': 1, 'accountId': 30, 'reversed': 1},
+      ];
+      expect(titleMatchesAccount(title, paid, ''), true);
+      expect(titleMatchesAccount(title, paid, '10'), true);
+      expect(titleMatchesAccount(title, paid, '20'), false);
+      title['remaining'] = 0;
+      expect(titleMatchesAccount(title, paid, '10'), false);
+      expect(titleMatchesAccount(title, paid, '20'), true);
+      expect(titleMatchesAccount(title, paid, '30'), false);
+      title['remaining'] = 100;
+      title['plannedAccountId'] = null;
+      expect(titleMatchesAccount(title, paid, 'unassigned'), true);
+      expect(titleMatchesAccount(title, paid, '10'), false);
+    },
+  );
   test('valores brasileiros preservam centavos sem ponto flutuante', () {
     expect(parseMoney('1.234,56'), 123456);
     expect(parseMoney('0,01'), 1);
@@ -12,6 +56,10 @@ void main() {
   test('situação dá prioridade ao cancelamento e à liquidação', () {
     expect(status({'cancelled': 1, 'remaining': 200}), 'Cancelado');
     expect(status({'cancelled': 0, 'remaining': 0}), 'Pago');
+    expect(
+      status({'kind': 'receivable', 'cancelled': 0, 'remaining': 0}),
+      'Recebido',
+    );
     expect(
       status({
         'cancelled': 0,

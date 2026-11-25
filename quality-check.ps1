@@ -58,5 +58,19 @@ $dotnetDirectory = Split-Path -Parent $dotnet
 $env:PATH = "$dotnetDirectory;$env:PATH"
 & (Join-Path $projectRoot 'test-api.ps1')
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& (Join-Path $projectRoot 'test-reversal-balance.ps1')
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& (Join-Path $projectRoot 'test-yearly-card.ps1')
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& (Join-Path $projectRoot 'test-yearly-titles.ps1')
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& (Join-Path $projectRoot 'test-title-accounts.ps1')
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& (Join-Path $projectRoot 'test-ofx-automatic.ps1')
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& $dotnet run --project (Join-Path $projectRoot 'tests\daily-session\DailySession.csproj')
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& (Join-Path $projectRoot 'test-daily-login.ps1')
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host 'QUALIDADE VALIDADA: compilacao, analise e testes concluidos.' -ForegroundColor Green

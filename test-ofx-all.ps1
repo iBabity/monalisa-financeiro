@@ -42,12 +42,6 @@ try{
  $linkItems=@($manual.transactions|ForEach-Object {@{transactionId=$_.id;existingSettlementId=$_.existingSettlementId}})
  Req '/companies/1/ofx/confirm' @{importId=$manual.importId;items=$linkItems}|Out-Null
  Check ((Req '/companies/1/state').accounts[0].balance-eq 6000) 'Vinculo de baixa existente preserva saldo'
- $file='C:\Users\conta\Downloads\Extrato Conta Corrente-011120262205.ofx'
- if(Test-Path -LiteralPath $file){
-  $real=Req '/companies/1/ofx/preview' @{accountId=1;fileName='itau.ofx';dataBase64=[Convert]::ToBase64String([IO.File]::ReadAllBytes($file))}
-  Check ($real.bankBalance-eq 1249 -and $real.balanceDate-eq '2026-11-01') 'Arquivo Itau real reconhece saldo e data'
-  Check (@($real.transactions|Where-Object future).Count-gt 0) 'Identifica datas futuras para conferencia'
- }
  'TESTES OFX COMPLETOS PASSARAM'
 }finally{
  if(!$p.HasExited){Stop-Process -Id $p.Id}

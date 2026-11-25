@@ -13,6 +13,7 @@ import 'browser_download.dart';
 import 'pdf_open.dart';
 import 'app_version.dart';
 import 'ui_components.dart';
+import 'month_navigator.dart';
 
 const teal = Color(0xFF073F43);
 const orange = Color(0xFFED791B);
@@ -124,6 +125,19 @@ class _WorkspaceState extends State<Workspace> {
   String? error;
   String search = '', filter = 'Todos';
   String categoryFilter = '', costCenterFilter = '', sortTitles = 'due';
+  String titleAccountFilter = '';
+  String get defaultPlannedAccount => int.tryParse(titleAccountFilter) != null
+      ? titleAccountFilter
+      : accounts.length == 1
+      ? '${accounts.first['id']}'
+      : '';
+  FormFieldSpec plannedAccountField({String? initial}) => FormFieldSpec(
+    'plannedAccountId',
+    'CONTA FINANCEIRA PREVISTA',
+    initial: initial ?? defaultPlannedAccount,
+    options: [const MapEntry('', 'NÃO DEFINIDA'), ...options(accounts)],
+    helper: 'A conta poderá ser alterada ao registrar a baixa.',
+  );
   final Set<int> selectedTitleIds = {};
   String registrySearch = '';
   String historySearch = '';
@@ -133,6 +147,7 @@ class _WorkspaceState extends State<Workspace> {
   String? historyDay = iso(DateTime.now());
   String selectedMonth = iso(DateTime.now()).substring(0, 7);
   DateTime reportStart = DateUtils.dateOnly(DateTime.now());
+  DateTime reportMonth = DateTime(DateTime.now().year, DateTime.now().month);
   DateTime reportEnd = DateUtils.dateOnly(DateTime.now());
   static const labels = [
     'Visão geral',
@@ -251,6 +266,10 @@ class _WorkspaceState extends State<Workspace> {
         titles = rows(data['titles']);
         parties = rows(data['parties']);
         accounts = rows(data['accounts']);
+        if (int.tryParse(titleAccountFilter) != null &&
+            !accounts.any((a) => '${a['id']}' == titleAccountFilter)) {
+          titleAccountFilter = '';
+        }
         settlements = rows(data['settlements']);
         movements = rows(data['movements']);
         audit = rows(data['audit']);
@@ -406,7 +425,7 @@ class _WorkspaceState extends State<Workspace> {
   }
 
   String get base => '/companies/$company';
-  String get serviceOrigin => kIsWeb ? Uri.base.origin : apiBase;
+  String get serviceOrigin => financeServiceOrigin;
   Color get mutedText => darkMode ? const Color(0xFFE1E8E6) : Colors.black54;
   Color get faintText => darkMode ? const Color(0xFFBEC9C6) : Colors.black45;
   Color get headingColor => darkMode ? const Color(0xFF8ED6D0) : teal;
@@ -424,6 +443,7 @@ class _WorkspaceState extends State<Workspace> {
   void selectPage(int targetPage, {bool closeDrawer = false}) {
     setState(() {
       page = targetPage;
+      titleAccountFilter = '';
       search = '';
       selectedTitleIds.clear();
       filter = targetPage == 1 || targetPage == 2 ? 'Em aberto' : 'Todos';
@@ -585,7 +605,7 @@ class _WorkspaceState extends State<Workspace> {
                         Icon(Icons.circle, size: 7, color: Color(0xFFBFD4AF)),
                         SizedBox(width: 8),
                         Text(
-                          'Ambiente de teste',
+                          'DADOS LOCAIS',
                           style: TextStyle(color: Colors.white, fontSize: 12),
                         ),
                       ],
@@ -746,31 +766,6 @@ class _WorkspaceState extends State<Workspace> {
                                     ),
                                   ),
                                 ),
-                              if (license['showcase'] == true) ...[
-                                const SizedBox(width: 14),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 10,
-                                    vertical: 5,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    color: orange.withValues(alpha: .12),
-                                    borderRadius: BorderRadius.circular(20),
-                                    border: Border.all(
-                                      color: orange.withValues(alpha: .35),
-                                    ),
-                                  ),
-                                  child: const Text(
-                                    'DEMONSTRAÇÃO',
-                                    style: TextStyle(
-                                      color: orange,
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.w800,
-                                      letterSpacing: .5,
-                                    ),
-                                  ),
-                                ),
-                              ],
                               const Spacer(),
                               IconButton(
                                 tooltip: 'Diminuir letras',
@@ -1147,17 +1142,10 @@ class _WorkspaceState extends State<Workspace> {
                               ),
                       ),
                       if (page == 1 || page == 2)
-                        Wrap(
-                          spacing: 8,
-                          runSpacing: 8,
-                          alignment: WrapAlignment.end,
-                          children: [
-                            FilledButton.icon(
-                              onPressed: openFinanceSandbox,
-                              icon: const Icon(Icons.account_balance_outlined),
-                              label: const Text('OPEN FINANCE — TESTE'),
-                            ),
-                            FilledButton.icon(
+                        Padding(
+                          padding: const EdgeInsets.only(top: 12, bottom: 24),
+                          child: Center(
+                            child: FilledButton.icon(
                               onPressed: importOfxPayables,
                               icon: const Icon(
                                 Icons.upload_file_outlined,
@@ -1165,7 +1153,7 @@ class _WorkspaceState extends State<Workspace> {
                               ),
                               label: const Text('CONCILIAR EXTRATO OFX'),
                             ),
-                          ],
+                          ),
                         ),
                     ],
                   ),
@@ -1533,7 +1521,7 @@ class _WorkspaceState extends State<Workspace> {
   List<Widget> reportsPage() {
     return [
       panel(
-        'Relatório financeiro por data',
+        'RELATÓRIO FINANCEIRO POR DATA',
         Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -1569,6 +1557,13 @@ class _WorkspaceState extends State<Workspace> {
                     ),
                   ),
                   FilledButton.icon(
+                    onPressed: reportBusy
+                        ? null
+                        : () => saveFinancialReport(preview: true),
+                    icon: const Icon(Icons.visibility_outlined),
+                    label: const Text('VISUALIZAR RELATÓRIO'),
+                  ),
+                  FilledButton.icon(
                     onPressed: reportBusy ? null : saveFinancialReport,
                     icon: reportBusy
                         ? const SizedBox(
@@ -1577,7 +1572,7 @@ class _WorkspaceState extends State<Workspace> {
                             child: CircularProgressIndicator(strokeWidth: 2),
                           )
                         : const Icon(Icons.picture_as_pdf_outlined),
-                    label: Text(reportBusy ? 'Gerando...' : 'Gerar PDF'),
+                    label: Text(reportBusy ? 'GERANDO...' : 'BAIXAR PDF'),
                   ),
                 ],
               ),
@@ -1610,8 +1605,78 @@ class _WorkspaceState extends State<Workspace> {
         ),
       ),
       const SizedBox(height: 22),
+      ...['payable', 'receivable'].expand(
+        (kind) => [
+          panel(
+            kind == 'payable'
+                ? 'RELATÓRIOS DE CONTAS A PAGAR'
+                : 'RELATÓRIOS DE CONTAS A RECEBER',
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text(
+                  'ESCOLHA O MÊS DE REFERÊNCIA. OS RELATÓRIOS DOS PRÓXIMOS MESES CONSIDERAM OS VENCIMENTOS APÓS ESSE MÊS.',
+                ),
+                const SizedBox(height: 12),
+                Wrap(
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  spacing: 8,
+                  children: [
+                    IconButton(
+                      tooltip: 'MÊS ANTERIOR',
+                      onPressed: reportBusy
+                          ? null
+                          : () => setState(
+                              () => reportMonth = DateTime(
+                                reportMonth.year,
+                                reportMonth.month - 1,
+                              ),
+                            ),
+                      icon: const Icon(Icons.chevron_left),
+                    ),
+                    Text(
+                      longMonthLabel(iso(reportMonth).substring(0, 7)),
+                      style: const TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                    IconButton(
+                      tooltip: 'PRÓXIMO MÊS',
+                      onPressed: reportBusy
+                          ? null
+                          : () => setState(
+                              () => reportMonth = DateTime(
+                                reportMonth.year,
+                                reportMonth.month + 1,
+                              ),
+                            ),
+                      icon: const Icon(Icons.chevron_right),
+                    ),
+                  ],
+                ),
+                ...titleReportOptions(kind).entries.map(
+                  (item) => reportRow(
+                    item.value.$1.toUpperCase(),
+                    subtitle: item.value.$2.toUpperCase(),
+                    preview: () => saveTitleReport(
+                      kind,
+                      item.key,
+                      preview: true,
+                      month: iso(reportMonth).substring(0, 7),
+                    ),
+                    download: () => saveTitleReport(
+                      kind,
+                      item.key,
+                      month: iso(reportMonth).substring(0, 7),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 22),
+        ],
+      ),
       panel(
-        'Relatórios detalhados e exportação',
+        'RELATÓRIOS DETALHADOS E EXPORTAÇÃO',
         Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -1627,29 +1692,12 @@ class _WorkspaceState extends State<Workspace> {
               'account': 'Extrato por conta financeira',
               'cash-flow': 'Fluxo de caixa previsto e realizado',
             }.entries.map(
-              (item) => ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.description_outlined, color: teal),
-                title: Text(item.value),
-                trailing: Wrap(
-                  spacing: 8,
-                  children: [
-                    OutlinedButton.icon(
-                      onPressed: reportBusy
-                          ? null
-                          : () => saveAdvancedReport(item.key, false),
-                      icon: const Icon(Icons.picture_as_pdf_outlined),
-                      label: const Text('PDF'),
-                    ),
-                    OutlinedButton.icon(
-                      onPressed: reportBusy
-                          ? null
-                          : () => saveAdvancedReport(item.key, true),
-                      icon: const Icon(Icons.table_view_outlined),
-                      label: const Text('CSV'),
-                    ),
-                  ],
-                ),
+              (item) => reportRow(
+                item.value.toUpperCase(),
+                preview: () =>
+                    saveAdvancedReport(item.key, false, preview: true),
+                download: () => saveAdvancedReport(item.key, false),
+                csv: () => saveAdvancedReport(item.key, true),
               ),
             ),
           ],
@@ -1657,6 +1705,51 @@ class _WorkspaceState extends State<Workspace> {
       ),
     ];
   }
+
+  Widget reportRow(
+    String title, {
+    String? subtitle,
+    required VoidCallback preview,
+    required VoidCallback download,
+    VoidCallback? csv,
+  }) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 14),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(title, style: const TextStyle(fontWeight: FontWeight.w600)),
+        if (subtitle != null) ...[
+          const SizedBox(height: 4),
+          Text(subtitle, style: TextStyle(color: mutedText, fontSize: 12)),
+        ],
+        const SizedBox(height: 10),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            FilledButton.icon(
+              onPressed: reportBusy ? null : preview,
+              icon: const Icon(Icons.visibility_outlined),
+              label: const Text('VISUALIZAR RELATÓRIO'),
+            ),
+            FilledButton.icon(
+              onPressed: reportBusy ? null : download,
+              icon: const Icon(Icons.picture_as_pdf_outlined),
+              label: const Text('BAIXAR PDF'),
+            ),
+            if (csv != null)
+              FilledButton.icon(
+                onPressed: reportBusy ? null : csv,
+                icon: const Icon(Icons.table_view_outlined),
+                label: const Text('EXPORTAR CSV'),
+              ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        const Divider(),
+      ],
+    ),
+  );
 
   Widget reportDateField(String label, DateTime value, VoidCallback onTap) =>
       InkWell(
@@ -1729,12 +1822,16 @@ class _WorkspaceState extends State<Workspace> {
     }
   }
 
-  Future<void> saveFinancialReport() async {
+  Future<void> saveFinancialReport({bool preview = false}) async {
     if (reportBusy) return;
+    final start = iso(reportStart);
+    final end = iso(reportEnd);
+    PdfPreviewSession? previewSession;
     setState(() => reportBusy = true);
     try {
+      if (preview) previewSession = PdfPreviewSession();
       final uri = Uri.parse(
-        '$serviceOrigin/api/companies/$company/reports/financial?start=${iso(reportStart)}&end=${iso(reportEnd)}',
+        '$serviceOrigin/api/companies/$company/reports/financial?start=$start&end=$end',
       );
       final response = await api.client
           .get(
@@ -1747,10 +1844,12 @@ class _WorkspaceState extends State<Workspace> {
       if (response.statusCode != 200) {
         throw Exception('Não foi possível gerar o relatório.');
       }
-      final periodName = reportStart == reportEnd
-          ? iso(reportStart)
-          : '${iso(reportStart)}-a-${iso(reportEnd)}';
+      final periodName = start == end ? start : '$start-a-$end';
       final fileName = 'relatorio-financeiro-$periodName.pdf';
+      if (previewSession != null) {
+        await previewSession.show(response.bodyBytes, fileName);
+        return;
+      }
       final file = XFile.fromData(
         response.bodyBytes,
         mimeType: 'application/pdf',
@@ -1777,19 +1876,28 @@ class _WorkspaceState extends State<Workspace> {
       await askToOpenPdf(response.bodyBytes, fileName, savedPath: savedPath);
       message('Relatório em PDF gerado com sucesso.');
     } catch (error) {
+      previewSession?.close();
       message(error.toString().replaceFirst('Exception: ', ''));
     } finally {
       if (mounted) setState(() => reportBusy = false);
     }
   }
 
-  Future<void> saveAdvancedReport(String type, bool csv) async {
+  Future<void> saveAdvancedReport(
+    String type,
+    bool csv, {
+    bool preview = false,
+  }) async {
     if (reportBusy) return;
+    final start = iso(reportStart);
+    final end = iso(reportEnd);
+    PdfPreviewSession? previewSession;
     setState(() => reportBusy = true);
     try {
+      if (preview && !csv) previewSession = PdfPreviewSession();
       final route = csv ? 'exports/csv' : 'reports/advanced';
       final uri = Uri.parse(
-        '$serviceOrigin/api/companies/$company/$route?type=$type&start=${iso(reportStart)}&end=${iso(reportEnd)}',
+        '$serviceOrigin/api/companies/$company/$route?type=$type&start=$start&end=$end',
       );
       final response = await api.client
           .get(
@@ -1803,8 +1911,11 @@ class _WorkspaceState extends State<Workspace> {
         throw Exception('Não foi possível gerar o arquivo.');
       }
       final extension = csv ? 'csv' : 'pdf';
-      final fileName =
-          '$type-${iso(reportStart)}-a-${iso(reportEnd)}.$extension';
+      final fileName = '$type-$start-a-$end.$extension';
+      if (previewSession != null) {
+        await previewSession.show(response.bodyBytes, fileName);
+        return;
+      }
       String? savedPath;
       if (kIsWeb) {
         await saveBrowserDownload(
@@ -1835,6 +1946,7 @@ class _WorkspaceState extends State<Workspace> {
       }
       message('${csv ? 'CSV' : 'PDF'} gerado com sucesso.');
     } catch (e) {
+      previewSession?.close();
       message(e.toString().replaceFirst('Exception: ', ''));
     } finally {
       if (mounted) setState(() => reportBusy = false);
@@ -1860,9 +1972,9 @@ class _WorkspaceState extends State<Workspace> {
     return '${names[int.parse(parts[1]) - 1]} DE ${parts[0]}';
   }
 
-  Future<void> showTitleReports(String kind) async {
+  Map<String, (String, String)> titleReportOptions(String kind) {
     final receivable = kind == 'receivable';
-    final options = <String, (String, String)>{
+    return <String, (String, String)>{
       receivable ? 'receipts' : 'payments': (
         receivable ? 'Extrato de recebimentos' : 'Extrato de pagamentos',
         receivable
@@ -1888,6 +2000,11 @@ class _WorkspaceState extends State<Workspace> {
         'Parcelas com saldo em aberto após o mês selecionado, separadas por mês.',
       ),
     };
+  }
+
+  Future<void> showTitleReports(String kind) async {
+    final receivable = kind == 'receivable';
+    final options = titleReportOptions(kind);
     await showDialog<void>(
       context: context,
       builder: (dialogContext) => SimpleDialog(
@@ -1939,8 +2056,15 @@ class _WorkspaceState extends State<Workspace> {
     );
   }
 
-  Future<void> saveTitleReport(String kind, String type) async {
+  Future<void> saveTitleReport(
+    String kind,
+    String type, {
+    bool preview = false,
+    String? month,
+  }) async {
     if (reportBusy) return;
+    final reportMonth = month ?? selectedMonth;
+    PdfPreviewSession? previewSession;
     final receivable = kind == 'receivable';
     final slugs = receivable
         ? const {
@@ -1957,8 +2081,9 @@ class _WorkspaceState extends State<Workspace> {
           };
     setState(() => reportBusy = true);
     try {
+      if (preview) previewSession = PdfPreviewSession();
       final uri = Uri.parse(
-        '$serviceOrigin/api/companies/$company/reports/${receivable ? 'receivables' : 'payables'}?month=$selectedMonth&type=$type',
+        '$serviceOrigin/api/companies/$company/reports/${receivable ? 'receivables' : 'payables'}?month=$reportMonth&type=$type',
       );
       final response = await api.client
           .get(
@@ -1971,7 +2096,11 @@ class _WorkspaceState extends State<Workspace> {
       if (response.statusCode != 200) {
         throw Exception('Não foi possível gerar o relatório.');
       }
-      final fileName = '${slugs[type]}-$selectedMonth.pdf';
+      final fileName = '${slugs[type]}-$reportMonth.pdf';
+      if (previewSession != null) {
+        await previewSession.show(response.bodyBytes, fileName);
+        return;
+      }
       final file = XFile.fromData(
         response.bodyBytes,
         mimeType: 'application/pdf',
@@ -1998,6 +2127,7 @@ class _WorkspaceState extends State<Workspace> {
       await askToOpenPdf(response.bodyBytes, fileName, savedPath: savedPath);
       message('Relatório em PDF gerado com sucesso.');
     } catch (error) {
+      previewSession?.close();
       message(error.toString().replaceFirst('Exception: ', ''));
     } finally {
       if (mounted) setState(() => reportBusy = false);
@@ -3366,36 +3496,6 @@ class _WorkspaceState extends State<Workspace> {
 
   List<Widget> titlePage() {
     final kind = page == 1 ? 'payable' : 'receivable';
-    final availableMonths = <String>{
-      for (var i = 0; i < 12; i++)
-        iso(DateTime(DateTime.now().year, DateTime.now().month + i, 1))
-            .substring(0, 7),
-      ...titles
-          .where(
-            (e) =>
-                e['kind'] == kind && e['cancelled'] == 0 && e['remaining'] > 0,
-          )
-          .map((e) => (e['due'] as String).substring(0, 7)),
-    }.toList()..sort();
-    String monthLabel(String value) {
-      const names = [
-        'JAN',
-        'FEV',
-        'MAR',
-        'ABR',
-        'MAI',
-        'JUN',
-        'JUL',
-        'AGO',
-        'SET',
-        'OUT',
-        'NOV',
-        'DEZ',
-      ];
-      final parts = value.split('-');
-      return '${names[int.parse(parts[1]) - 1]}/${parts[0].substring(2)}';
-    }
-
     final list =
         titles
             .where(
@@ -3406,6 +3506,7 @@ class _WorkspaceState extends State<Workspace> {
                       .toLowerCase()
                       .contains(search.toLowerCase()) &&
                   (categoryFilter.isEmpty || e['category'] == categoryFilter) &&
+                  titleMatchesAccount(e, settlements, titleAccountFilter) &&
                   (costCenterFilter.isEmpty ||
                       e['costCenter'] == costCenterFilter) &&
                   (filter == 'Todos' ||
@@ -3449,7 +3550,7 @@ class _WorkspaceState extends State<Workspace> {
                 'Em aberto',
                 'Parcial',
                 'Vencido',
-                'Pago',
+                page == 2 ? 'Recebido' : 'Pago',
                 'Cancelado',
               ].map((s) => DropdownMenuItem(value: s, child: Text(s))).toList(),
               onChanged: (v) => setState(() => filter = v!),
@@ -3463,6 +3564,38 @@ class _WorkspaceState extends State<Workspace> {
         runSpacing: 12,
         crossAxisAlignment: WrapCrossAlignment.center,
         children: [
+          SizedBox(
+            width: 240,
+            child: DropdownButtonFormField<String>(
+              key: ValueKey('account-$company-$page-$titleAccountFilter'),
+              initialValue: titleAccountFilter,
+              isExpanded: true,
+              decoration: const InputDecoration(labelText: 'CONTA FINANCEIRA'),
+              items: [
+                const DropdownMenuItem(
+                  value: '',
+                  child: Text('TODAS AS CONTAS'),
+                ),
+                const DropdownMenuItem(
+                  value: 'unassigned',
+                  child: Text('CONTA NÃO DEFINIDA'),
+                ),
+                ...accounts.map(
+                  (a) => DropdownMenuItem(
+                    value: '${a['id']}',
+                    child: Text(
+                      '${a['name']}',
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ),
+              ],
+              onChanged: (v) => setState(() {
+                titleAccountFilter = v ?? '';
+                selectedTitleIds.clear();
+              }),
+            ),
+          ),
           SizedBox(
             width: 230,
             child: DropdownButtonFormField<String>(
@@ -3603,18 +3736,36 @@ class _WorkspaceState extends State<Workspace> {
         ),
       ),
       const SizedBox(height: 16),
-      SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: SegmentedButton<String>(
-          segments: availableMonths
-              .map((m) => ButtonSegment(value: m, label: Text(monthLabel(m))))
-              .toList(),
-          selected: {selectedMonth},
-          onSelectionChanged: (value) =>
-              setState(() => selectedMonth = value.first),
-        ),
+      MonthNavigator(
+        value: selectedMonth,
+        onChanged: (value) => setState(() {
+          selectedMonth = value;
+          selectedTitleIds.clear();
+        }),
       ),
+      if (selectedMonth.compareTo(iso(DateTime.now()).substring(0, 7)) < 0 &&
+          filter == 'Em aberto')
+        Padding(
+          padding: const EdgeInsets.only(top: 10),
+          child: Text(
+            'PARA INCLUIR CONTAS JÁ PAGAS OU RECEBIDAS, ALTERE A SITUAÇÃO PARA TODOS.',
+            style: TextStyle(color: mutedText, fontSize: 12),
+          ),
+        ),
     ];
+  }
+
+  String titleAccountLabel(RecordData t) {
+    if ((t['remaining'] as num) > 0) {
+      return '${t['plannedAccountName'] ?? 'CONTA NÃO DEFINIDA'}';
+    }
+    final names = settlements
+        .where((s) => s['titleId'] == t['id'] && s['reversed'] != 1)
+        .map((s) => '${s['accountName']}')
+        .toSet();
+    return names.isEmpty
+        ? '${t['plannedAccountName'] ?? 'CONTA NÃO DEFINIDA'}'
+        : names.join(' / ');
   }
 
   Widget titleTable(List<RecordData> list, {bool colorRows = false}) {
@@ -3657,6 +3808,7 @@ class _WorkspaceState extends State<Workspace> {
               ),
               for (final label in [
                 'Descrição / pessoa',
+                'CONTA FINANCEIRA',
                 'Vencimento',
                 'Valor',
                 'Em aberto',
@@ -3736,6 +3888,17 @@ class _WorkspaceState extends State<Workspace> {
                         ),
                       ),
                       DataCell(
+                        SizedBox(
+                          width: 175,
+                          child: Text(
+                            titleAccountLabel(t),
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontSize: 12),
+                          ),
+                        ),
+                      ),
+                      DataCell(
                         Text(
                           dateLabel(t['due']),
                           style: const TextStyle(fontSize: 12),
@@ -3808,6 +3971,7 @@ class _WorkspaceState extends State<Workspace> {
   Color statusColor(String text) => switch (text) {
     'Vencido' => const Color(0xFFB54235),
     'Pago' => const Color(0xFF23734D),
+    'Recebido' => const Color(0xFF23734D),
     'Parcial' => const Color(0xFF276BA6),
     'Cancelado' => const Color(0xFF70757A),
     _ => const Color(0xFFC06A16),
@@ -4482,23 +4646,125 @@ class _WorkspaceState extends State<Workspace> {
   List<MapEntry<String, String>> options(List<RecordData> list) =>
       list.map((e) => MapEntry('${e['id']}', '${e['name']}')).toList();
 
+  Future<RecordData?> quickParty(String kind, [String initialName = '']) async {
+    RecordData? result;
+    final supplier = kind == 'payable';
+    await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => EntryDialog(
+        title: supplier ? 'NOVO FORNECEDOR' : 'NOVO CLIENTE',
+        note: 'AO SALVAR, O CADASTRO FICARÁ SELECIONADO NO LANÇAMENTO.',
+        fields: [
+          FormFieldSpec(
+            'name',
+            'NOME DA PESSOA OU EMPRESA',
+            initial: initialName,
+            required: true,
+          ),
+          FormFieldSpec(
+            'document',
+            'CPF / CNPJ (OPCIONAL)',
+            document: 'document',
+          ),
+          FormFieldSpec(
+            'type',
+            'USAR ESTE CADASTRO COMO',
+            initial: supplier ? 'supplier' : 'customer',
+            options: [
+              MapEntry(
+                supplier ? 'supplier' : 'customer',
+                supplier ? 'FORNECEDOR' : 'CLIENTE',
+              ),
+              const MapEntry('both', 'CLIENTE E FORNECEDOR'),
+            ],
+          ),
+          FormFieldSpec('phone', 'TELEFONE (OPCIONAL)'),
+        ],
+        save: (v) async {
+          final name = v['name']!.trim().toUpperCase();
+          final document = v['document']!
+              .replaceAll(RegExp('[^A-Za-z0-9]'), '')
+              .toUpperCase();
+          final matches = parties
+              .where(
+                (p) => document.isNotEmpty
+                    ? '${p['document']}'
+                              .replaceAll(RegExp('[^A-Za-z0-9]'), '')
+                              .toUpperCase() ==
+                          document
+                    : '${p['name']}'.trim().toUpperCase() == name,
+              )
+              .toList();
+          if (matches.length > 1) {
+            throw Exception(
+              'EXISTE MAIS DE UM CADASTRO COM ESSES DADOS. SELECIONE O CADASTRO NA LISTA.',
+            );
+          }
+          if (matches.isNotEmpty) {
+            final existing = matches.single;
+            if (existing['type'] != 'both' && existing['type'] != v['type']) {
+              throw Exception(
+                'ESTE CADASTRO JÁ EXISTE COM OUTRO TIPO. AJUSTE PARA CLIENTE E FORNECEDOR EM CADASTROS.',
+              );
+            }
+            result = existing;
+            return;
+          }
+          final response = await api.request('$base/parties', {
+            'name': name,
+            'document': document,
+            'type': v['type'],
+            'phone': v['phone'],
+            'email': '',
+          });
+          result = {
+            'id': response['id'],
+            'name': name,
+            'document': document,
+            'type': v['type'],
+            'phone': v['phone'],
+            'email': '',
+          };
+          parties = [...parties, result!];
+        },
+      ),
+    );
+    return result;
+  }
+
   Future<void> quickTitleConversation(String kind) async {
     final receivable = kind == 'receivable';
+    int? partyId;
+    int? plannedAccountId = int.tryParse(defaultPlannedAccount);
     final saved = await showDialog<bool>(
       context: context,
       barrierDismissible: false,
       builder: (_) => ExpenseConversationDialog(
         receivable: receivable,
+        parties: parties
+            .where(
+              (p) =>
+                  p['type'] == 'both' ||
+                  p['type'] == (receivable ? 'customer' : 'supplier'),
+            )
+            .toList(),
+        onPartySelected: (value) => partyId = value,
+        createParty: () => quickParty(kind),
+        accounts: accounts,
+        initialAccountId: plannedAccountId,
+        onAccountSelected: (value) => plannedAccountId = value,
         save: (description, amount, due) async {
           await api.request('$base/titles', {
             'kind': kind,
             'description': description,
             'amount': amount,
             'due': due,
-            'partyId': null,
+            'partyId': partyId,
             'category': receivable ? 'RECEITAS DE SERVIÇOS' : 'DESPESAS GERAIS',
             'notes': '',
             'installments': 1,
+            'plannedAccountId': plannedAccountId,
           });
         },
       ),
@@ -4556,6 +4822,13 @@ class _WorkspaceState extends State<Workspace> {
         FormFieldSpec('issueDate', 'Data de emissão (opcional)', date: true),
         FormFieldSpec(
           'partyName',
+          createLabel: kind == 'payable' ? 'NOVO FORNECEDOR' : 'NOVO CLIENTE',
+          createOption: (current) async {
+            final party = await quickParty(kind, current);
+            return party == null
+                ? null
+                : MapEntry('${party['name']}', '${party['name']}');
+          },
           kind == 'payable' ? 'Fornecedor (opcional)' : 'Cliente (opcional)',
           hint: kind == 'payable'
               ? 'Digite o nome do fornecedor'
@@ -4613,6 +4886,7 @@ class _WorkspaceState extends State<Workspace> {
                     .map((item) => item['name'] as String)
                     .toList(),
               ),
+        plannedAccountField(),
         FormFieldSpec(
           'paymentMethodId',
           kind == 'payable'
@@ -4639,6 +4913,7 @@ class _WorkspaceState extends State<Workspace> {
             MapEntry('single', 'CONTA ÚNICA'),
             MapEntry('monthly', 'DIVIDIR O TOTAL EM PARCELAS MENSAIS'),
             MapEntry('monthly_repeat', 'REPETIR O MESMO VALOR TODO MÊS'),
+            MapEntry('yearly_repeat', 'REPETIR O MESMO VALOR TODO ANO'),
             MapEntry('weekly', 'REPETIR O MESMO VALOR A CADA 7 DIAS'),
             MapEntry('custom', 'REPETIR EM UM INTERVALO DE DIAS'),
           ],
@@ -4653,11 +4928,12 @@ class _WorkspaceState extends State<Workspace> {
           required: true,
           helper: kind == 'payable'
               ? 'Informe quantas vezes a despesa deve aparecer.'
-              : 'Use 1 para uma conta única, ou informe quantas parcelas mensais deseja.',
+              : 'Informe quantas vezes o recebimento deve aparecer.',
           visibleWhenKey: 'repeatMode',
           visibleWhenValues: const {
             'monthly',
             'monthly_repeat',
+            'yearly_repeat',
             'weekly',
             'custom',
           },
@@ -4684,6 +4960,7 @@ class _WorkspaceState extends State<Workspace> {
             : int.tryParse(v['installments']!) ?? 0;
         final enteredAmount = parseMoney(v['amount']!);
         final repeating = repeatsEachTitle(repeatMode);
+        final intervalMonths = repeatMode == 'yearly_repeat' ? 12 : 1;
         final intervalDays = repeatMode == 'weekly'
             ? 7
             : repeatMode == 'custom'
@@ -4704,6 +4981,7 @@ class _WorkspaceState extends State<Workspace> {
                 installmentCount,
                 v['due']!,
                 intervalDays: intervalDays,
+                intervalMonths: intervalMonths,
                 repeatedAmount: repeating ? enteredAmount : null,
               )
             : null;
@@ -4785,10 +5063,12 @@ class _WorkspaceState extends State<Workspace> {
           'branch': hasMatrixOrBranch ? v['branch'] : '',
           'costCenter': v['costCenter'],
           'paymentMethodId': int.tryParse(v['paymentMethodId'] ?? ''),
+          'plannedAccountId': int.tryParse(v['plannedAccountId'] ?? ''),
           'installments': installmentCount,
           'installmentAmounts': schedule?.map((e) => e['amount']).toList(),
           'installmentDues': schedule?.map((e) => e['due']).toList(),
           'installmentIntervalDays': intervalDays,
+          'installmentIntervalMonths': intervalMonths,
         });
       },
       note: 'Você pode criar uma conta única, dividir o total ou repetir o mesmo valor mensalmente, semanalmente ou em um intervalo escolhido. O saldo só muda quando houver baixa.',
@@ -4800,6 +5080,7 @@ class _WorkspaceState extends State<Workspace> {
     int count,
     String firstDue, {
     int intervalDays = 0,
+    int intervalMonths = 1,
     int? repeatedAmount,
   }) async {
     final amountValues = scheduledAmounts(
@@ -4811,6 +5092,7 @@ class _WorkspaceState extends State<Workspace> {
       firstDue,
       count,
       intervalDays: intervalDays,
+      intervalMonths: intervalMonths,
     );
     final amounts = amountValues
         .map((value) => TextEditingController(text: inputMoney(value)))
@@ -4833,7 +5115,9 @@ class _WorkspaceState extends State<Workspace> {
               children: [
                 Text(
                   repeatedAmount != null
-                      ? '$count lançamentos de ${money(repeatedAmount)} ${intervalDays == 0
+                      ? '$count lançamentos de ${money(repeatedAmount)} ${intervalMonths == 12
+                            ? 'todo ano'
+                            : intervalDays == 0
                             ? 'todo mês'
                             : intervalDays == 7
                             ? 'a cada 7 dias'
@@ -5105,15 +5389,28 @@ class _WorkspaceState extends State<Workspace> {
       final transactions = rows(preview['transactions']);
       final matches = <int, int>{};
       final selected = <int>{};
+      final confirmedNew = <int>{};
       final categories = <int, String>{};
-      var updateBalance = false;
+      final partyNames = <int, String>{
+        for (final t in transactions)
+          (t['id'] as num).toInt(): '${t['suggestedParty'] ?? ''}',
+      };
+      var updateBalance =
+          preview['bankBalance'] != null &&
+          preview['duplicates'] != preview['total'] &&
+          !transactions.any((t) => t['reviewRequired'] == true) &&
+          '${preview['balanceDate']}'.isNotEmpty &&
+          '${preview['balanceDate']}'.compareTo(iso(DateTime.now())) <= 0;
       for (final t in transactions) {
         final id = (t['id'] as num).toInt();
         if (t['duplicate'] == true || t['future'] == true) continue;
+        if (t['reviewRequired'] == true) continue;
         if (t['existingSettlementId'] is num) {
           matches[id] = -(t['existingSettlementId'] as num).toInt();
         } else if (t['suggestedTitleId'] is num) {
           matches[id] = (t['suggestedTitleId'] as num).toInt();
+        } else if (t['internalTransfer'] == true || t['autoCreate'] == true) {
+          matches[id] = 0;
         }
         if (matches.containsKey(id)) selected.add(id);
       }
@@ -5132,7 +5429,7 @@ class _WorkspaceState extends State<Workspace> {
                     '${preview['accountName']} • ${preview['total']} MOVIMENTAÇÕES • ${preview['duplicates']} CONCILIADAS',
                   ),
                   const Text(
-                    'Confira entradas e saídas. Para o que falta, escolha CRIAR NOVO. Valores iguais são sugestões e precisam ser conferidos.',
+                    'BAIXAS EXISTENTES SERÃO VINCULADAS SEM DUPLICAR. COFRINHOS SÃO TRANSFERÊNCIAS. DIFERENÇAS FICAM A CLASSIFICAR. CONFIRA AS CORRESPONDÊNCIAS ANTES DE CONFIRMAR.',
                   ),
                   if (preview['bankBalance'] != null &&
                       '${preview['balanceDate']}'.isNotEmpty)
@@ -5151,7 +5448,9 @@ class _WorkspaceState extends State<Workspace> {
                   TextButton(
                     onPressed: () => setLocal(() {
                       for (final t in transactions) {
-                        if (t['duplicate'] == true || t['future'] == true) {
+                        if (t['duplicate'] == true ||
+                            t['future'] == true ||
+                            t['reviewRequired'] == true) {
                           continue;
                         }
                         final id = (t['id'] as num).toInt();
@@ -5210,7 +5509,7 @@ class _WorkspaceState extends State<Workspace> {
                                         : ''}',
                                   ),
                                 ),
-                                if (!blocked)
+                                if (!blocked && t['internalTransfer'] != true)
                                   DropdownButtonFormField<int>(
                                     key: ValueKey('ofx-$id-${matches[id]}'),
                                     initialValue: matches[id],
@@ -5237,11 +5536,23 @@ class _WorkspaceState extends State<Workspace> {
                                             overflow: TextOverflow.ellipsis,
                                           ),
                                         ),
+                                      if (t['existingSettlementId'] == null)
+                                        ...rows(
+                                          t['existingSettlementChoices'] ?? [],
+                                        ).map(
+                                          (s) => DropdownMenuItem<int>(
+                                            value: -(s['id'] as num).toInt(),
+                                            child: Text(
+                                              'VINCULAR ${s['description']} • ${dateLabel(s['date'])}',
+                                              overflow: TextOverflow.ellipsis,
+                                            ),
+                                          ),
+                                        ),
                                       ...candidates.map(
                                         (v) => DropdownMenuItem<int>(
                                           value: (v['id'] as num).toInt(),
                                           child: Text(
-                                            '${v['description']} • ${money(v['remaining'])}',
+                                            '${v['description']} • VENC. ${dateLabel(v['due'])} • ${money(v['remaining'])}',
                                             overflow: TextOverflow.ellipsis,
                                           ),
                                         ),
@@ -5250,11 +5561,13 @@ class _WorkspaceState extends State<Workspace> {
                                     onChanged: (v) => setLocal(() {
                                       if (v != null) {
                                         matches[id] = v;
+                                        confirmedNew.remove(id);
                                         selected.add(id);
                                       }
                                     }),
                                   ),
                                 if (!blocked &&
+                                    t['internalTransfer'] != true &&
                                     matches[id] == 0 &&
                                     planOptions.isNotEmpty)
                                   Padding(
@@ -5278,9 +5591,60 @@ class _WorkspaceState extends State<Workspace> {
                                       },
                                     ),
                                   ),
+                                if (!blocked &&
+                                    t['internalTransfer'] != true &&
+                                    (matches[id] ?? 0) >= 0)
+                                  Padding(
+                                    padding: const EdgeInsets.only(top: 10),
+                                    child: TextFormField(
+                                      initialValue: partyNames[id] ?? '',
+                                      inputFormatters: [
+                                        UpperCaseTextFormatter(),
+                                      ],
+                                      decoration: InputDecoration(
+                                        labelText: t['kind'] == 'payable'
+                                            ? 'FORNECEDOR IDENTIFICADO'
+                                            : 'CLIENTE IDENTIFICADO',
+                                        helperText: 'CONFIRA O NOME. EM BRANCO, NÃO SERÁ CRIADO CADASTRO.',
+                                      ),
+                                      onChanged: (v) => partyNames[id] = v
+                                          .trim()
+                                          .toUpperCase(),
+                                    ),
+                                  ),
                                 if (!blocked && (matches[id] ?? 0) < 0)
                                   const Text(
-                                    'A BAIXA JÁ EXISTE. VINCULAR NÃO MOVIMENTARÁ O SALDO NOVAMENTE.',
+                                    'AS BAIXAS EXISTENTES NÃO MOVIMENTAM O SALDO NOVAMENTE. SOMENTE UMA EVENTUAL DIFERENÇA SERÁ REGISTRADA A CLASSIFICAR.',
+                                  ),
+                                if (t['internalTransfer'] == true)
+                                  const Text(
+                                    'TRANSFERÊNCIA DE COFRINHOS — SEM RECEITA OU DESPESA.',
+                                  ),
+                                if (t['bankAmount'] != null &&
+                                    t['bankAmount'] != t['amount'])
+                                  Text(
+                                    'VALOR ORIGINAL DO BANCO: ${money(t['bankAmount'])}. A CONCILIAR: ${money(t['amount'])}.',
+                                  ),
+                                if (t['reviewRequired'] == true)
+                                  const Text(
+                                    'MAIS DE UMA CORRESPONDÊNCIA OU VALOR DIFERENTE: ESCOLHA A BAIXA/PARCELA CORRETA PARA EVITAR DUPLICIDADE.',
+                                  ),
+                                if (t['reviewRequired'] == true &&
+                                    matches[id] == 0 &&
+                                    t['internalTransfer'] != true)
+                                  CheckboxListTile(
+                                    value: confirmedNew.contains(id),
+                                    onChanged: (value) => setLocal(() {
+                                      if (value == true) {
+                                        confirmedNew.add(id);
+                                        selected.add(id);
+                                      } else {
+                                        confirmedNew.remove(id);
+                                      }
+                                    }),
+                                    title: const Text(
+                                      'CONFIRMO QUE É OUTRO PAGAMENTO, SEM CORRESPONDÊNCIA NOS LANÇAMENTOS EXISTENTES.',
+                                    ),
                                   ),
                               ],
                             ),
@@ -5317,9 +5681,21 @@ class _WorkspaceState extends State<Workspace> {
                 'transactionId': id,
                 'titleId': (matches[id] ?? 0) > 0 ? matches[id] : 0,
                 'create': matches[id] == 0,
+                'confirmNew': confirmedNew.contains(id),
+                'partyName': partyNames[id] ?? '',
                 'category': categories[id] ?? '',
                 'existingSettlementId': (matches[id] ?? 0) < 0
                     ? -matches[id]!
+                    : null,
+                'existingSettlementIds':
+                    (matches[id] ?? 0) < 0 &&
+                        transactions.firstWhere(
+                              (t) => t['id'] == id,
+                            )['existingSettlementId'] ==
+                            -matches[id]!
+                    ? transactions.firstWhere(
+                        (t) => t['id'] == id,
+                      )['existingSettlementIds']
                     : null,
               },
             )
@@ -5355,7 +5731,7 @@ class _WorkspaceState extends State<Workspace> {
           'Conta financeira',
           required: true,
           options: options(accounts),
-          initial: '${accounts.first['id']}',
+          initial: '${t['plannedAccountId'] ?? accounts.first['id']}',
         ),
         FormFieldSpec(
           'principal',
@@ -5465,7 +5841,13 @@ class _WorkspaceState extends State<Workspace> {
           'Conta financeira',
           required: true,
           options: options(accounts),
-          initial: '${accounts.first['id']}',
+          initial:
+              chosen.map((t) => t['plannedAccountId']).toSet().length == 1 &&
+                  chosen.first['plannedAccountId'] != null
+              ? '${chosen.first['plannedAccountId']}'
+              : defaultPlannedAccount.isNotEmpty
+              ? defaultPlannedAccount
+              : '${accounts.first['id']}',
         ),
         FormFieldSpec(
           'date',
@@ -6449,6 +6831,18 @@ class _WorkspaceState extends State<Workspace> {
     form(
       action == 'cancel' ? 'Cancelar lançamento' : 'Estornar baixa',
       [
+        if (action != 'cancel')
+          FormFieldSpec(
+            'adjustBalance',
+            'O ESTORNO DEVE ALTERAR O SALDO DA CONTA?',
+            initial: 'true',
+            required: true,
+            options: const [
+              MapEntry('true', 'SIM — ESTORNAR E ATUALIZAR O SALDO'),
+              MapEntry('false', 'NÃO — DESFAZER A BAIXA E MANTER O SALDO'),
+            ],
+            helper: 'ESCOLHA NÃO SE O DINHEIRO CONTINUA PAGO OU RECEBIDO NO BANCO E VOCÊ QUER CORRIGIR APENAS A BAIXA. A PARCELA VOLTARÁ A FICAR EM ABERTO.',
+          ),
         if (action == 'cancel' && t['installmentGroup'] != null)
           FormFieldSpec(
             'scope',
@@ -6472,7 +6866,10 @@ class _WorkspaceState extends State<Workspace> {
         ),
       ],
       (v) async {
-        await api.request(path, v);
+        await api.request(path, {
+          ...v,
+          if (action != 'cancel') 'adjustBalance': v['adjustBalance'] == 'true',
+        });
       },
       note: action == 'cancel' && t['installmentGroup'] != null
           ? 'Esta é a parcela ${t['installmentNumber']} de ${t['installmentCount']}. Você pode cancelar só ela ou todas as $cancellable parcelas sem baixa deste mesmo lançamento. ${linked.length - cancellable} parcela(s) com baixa serão preservadas. O cancelamento ficará no histórico.'
@@ -6531,6 +6928,15 @@ class _WorkspaceState extends State<Workspace> {
         ),
         FormFieldSpec(
           'partyId',
+          createLabel: t['kind'] == 'payable'
+              ? 'NOVO FORNECEDOR'
+              : 'NOVO CLIENTE',
+          createOption: (_) async {
+            final party = await quickParty(t['kind']);
+            return party == null
+                ? null
+                : MapEntry('${party['id']}', '${party['name']}');
+          },
           t['kind'] == 'payable'
               ? 'Fornecedor (opcional)'
               : 'Cliente (opcional)',
@@ -6591,6 +6997,7 @@ class _WorkspaceState extends State<Workspace> {
                     .map((item) => item['name'] as String)
                     .toList(),
               ),
+        plannedAccountField(initial: '${t['plannedAccountId'] ?? ''}'),
         FormFieldSpec(
           'paymentMethodId',
           t['kind'] == 'payable'
@@ -6617,7 +7024,7 @@ class _WorkspaceState extends State<Workspace> {
               const MapEntry('single', 'Somente esta parcela'),
               MapEntry('all_open', 'Todas as parcelas sem baixa ($editable)'),
             ],
-            helper: 'Ao editar todas, o valor informado será aplicado a cada parcela e os vencimentos mensais serão mantidos.',
+            helper: 'Ao editar todas, o valor informado será aplicado a cada parcela e a periodicidade mensal ou anual será mantida.',
           ),
       ],
       (v) async {
@@ -6633,6 +7040,7 @@ class _WorkspaceState extends State<Workspace> {
           'branch': hasMatrixOrBranch ? v['branch'] : t['branch'],
           'costCenter': v['costCenter'],
           'paymentMethodId': int.tryParse(v['paymentMethodId'] ?? ''),
+          'plannedAccountId': int.tryParse(v['plannedAccountId'] ?? ''),
           'scope': v['scope'] ?? 'single',
         });
       },
@@ -6856,7 +7264,7 @@ class _WorkspaceState extends State<Workspace> {
                               ),
                               title: Text('${charge['description']}'),
                               subtitle: Text(
-                                '${money(charge['amount'])} TODO MÊS • DESDE ${dateLabel('${charge['startDate']}')}',
+                                '${money(charge['amount'])} TODO ${charge['intervalMonths'] == 12 ? 'ANO' : 'MÊS'} • DESDE ${dateLabel('${charge['startDate']}')}',
                               ),
                               trailing: charge['active'] == 1
                                   ? TextButton(
@@ -7106,7 +7514,8 @@ class _WorkspaceState extends State<Workspace> {
         FormFieldSpec('description', 'O que foi comprado?', required: true),
         FormFieldSpec(
           'amount',
-          'Valor total (R\$)',
+          'VALOR (R\$)',
+          helper: 'NA COMPRA PARCELADA: TOTAL. NA REPETIÇÃO: VALOR DE CADA COBRANÇA.',
           required: true,
           money: true,
         ),
@@ -7126,12 +7535,17 @@ class _WorkspaceState extends State<Workspace> {
             MapEntry('single', 'COMPRA ÚNICA'),
             MapEntry('installments', 'COMPRA PARCELADA'),
             MapEntry('recurring', 'COBRANÇA RECORRENTE TODO MÊS'),
+            MapEntry('yearly', 'REPETIR O VALOR TODO ANO (X VEZES)'),
+            MapEntry('recurring_yearly', 'COBRANÇA RECORRENTE TODO ANO'),
           ],
         ),
         FormFieldSpec(
           'installments',
-          'Quantidade de parcelas (somente para compra parcelada)',
+          'QUANTIDADE DE PARCELAS OU ANOS',
           initial: '1',
+          required: true,
+          visibleWhenKey: 'mode',
+          visibleWhenValues: const {'installments', 'yearly'},
         ),
         FormFieldSpec(
           'category',
@@ -7155,13 +7569,15 @@ class _WorkspaceState extends State<Workspace> {
             'amount': parseMoney(values['amount']!),
             'purchaseDate': values['purchaseDate'],
             'mode': values['mode'],
-            'installments': int.tryParse(values['installments'] ?? ''),
+            'installments': {'installments', 'yearly'}.contains(values['mode'])
+                ? int.tryParse(values['installments'] ?? '')
+                : 1,
             'category': values['category'],
             'notes': values['notes'],
           },
         );
       },
-      note: 'Na compra parcelada, o valor total é dividido. Na cobrança recorrente, o mesmo valor entra todo mês até você encerrar.',
+      note: 'Na compra parcelada, o total é dividido. Na repetição anual, cada ano recebe o valor informado. A recorrência mensal ou anual continua até você encerrar.',
     );
   }
 
@@ -7230,7 +7646,7 @@ class _WorkspaceState extends State<Workspace> {
           children: [
             Text(
               purchase['recurringChargeId'] != null
-                  ? 'Somente esta cobrança mensal será retirada da fatura. A recorrência continuará nos próximos meses.'
+                  ? 'Somente esta cobrança será retirada da fatura. A recorrência continuará na periodicidade cadastrada.'
                   : purchase['installmentCount'] > 1
                   ? 'Todas as ${purchase['installmentCount']} parcelas desta compra serão retiradas das faturas.'
                   : 'Esta compra será retirada da fatura.',

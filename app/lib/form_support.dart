@@ -84,6 +84,9 @@ class FormFieldSpec {
   final bool required, date, money, pastOnly, advanced, secret;
   final List<MapEntry<String, String>>? options;
   final List<String>? suggestions;
+  final Future<MapEntry<String, String>?> Function(String current)?
+  createOption;
+  final String? createLabel;
   final Set<String>? visibleWhenValues;
   FormFieldSpec(
     this.keyName,
@@ -94,6 +97,8 @@ class FormFieldSpec {
     this.money = false,
     this.options,
     this.suggestions,
+    this.createOption,
+    this.createLabel,
     this.hint,
     this.helper,
     this.document,

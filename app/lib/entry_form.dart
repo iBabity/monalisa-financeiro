@@ -41,6 +41,8 @@ class _EntryDialogState extends State<EntryDialog> {
   bool busy = false;
   bool showAdvanced = false;
   String? error;
+  String? creatingOption;
+  final Map<String, List<MapEntry<String, String>>> createdOptions = {};
   @override
   void dispose() {
     for (final c in controllers.values) {
@@ -53,7 +55,7 @@ class _EntryDialogState extends State<EntryDialog> {
   }
 
   Future<void> submit() async {
-    if (busy || !key.currentState!.validate()) return;
+    if (busy || creatingOption != null || !key.currentState!.validate()) return;
     setState(() {
       busy = true;
       error = null;
@@ -146,10 +148,64 @@ class _EntryDialogState extends State<EntryDialog> {
   }
 
   Widget field(FormFieldSpec f, int index) {
+    final control = fieldControl(f, index);
+    if (f.createOption == null) return control;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        control,
+        const SizedBox(height: 8),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: FilledButton.tonalIcon(
+            onPressed: busy || creatingOption != null
+                ? null
+                : () async {
+                    setState(() => creatingOption = f.keyName);
+                    try {
+                      final option = await f.createOption!(
+                        controllers[f.keyName]!.text,
+                      );
+                      if (!mounted || option == null) return;
+                      setState(() {
+                        final existing = [
+                          ...?f.options,
+                          ...?createdOptions[f.keyName],
+                        ];
+                        if (!existing.any((e) => e.key == option.key)) {
+                          createdOptions
+                              .putIfAbsent(f.keyName, () => [])
+                              .add(option);
+                        }
+                        controllers[f.keyName]!.text = option.key;
+                      });
+                    } catch (e) {
+                      if (mounted) {
+                        setState(
+                          () => error = e.toString().replaceFirst(
+                            'Exception: ',
+                            '',
+                          ),
+                        );
+                      }
+                    } finally {
+                      if (mounted) setState(() => creatingOption = null);
+                    }
+                  },
+            icon: const Icon(Icons.person_add_alt_1_outlined, size: 18),
+            label: Text(f.createLabel ?? 'NOVO CADASTRO'),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget fieldControl(FormFieldSpec f, int index) {
     final controller = controllers[f.keyName]!;
     final label = '${f.label}${f.required ? ' *' : ''}';
     if (f.options != null) {
       return DropdownButtonFormField<String>(
+        key: ValueKey('${f.keyName}-${controller.text}'),
         initialValue: controller.text,
         isExpanded: true,
         decoration: InputDecoration(
@@ -157,7 +213,7 @@ class _EntryDialogState extends State<EntryDialog> {
           helperText: f.helper,
           helperMaxLines: 3,
         ),
-        items: f.options!
+        items: [...f.options!, ...?createdOptions[f.keyName]]
             .map((o) => DropdownMenuItem(value: o.key, child: Text(o.value)))
             .toList(),
         onChanged: busy
@@ -355,8 +411,16 @@ class _EntryDialogState extends State<EntryDialog> {
     try {
       if (controllers.containsKey('installments')) {
         final repeatMode = controllers['repeatMode']?.text ?? 'monthly';
+        final cardMode = controllers['mode']?.text;
         final count = int.tryParse(controllers['installments']!.text) ?? 0;
         final amount = parseMoney(controllers['amount']!.text);
+        if (cardMode == 'single') return 'COMPRA ÚNICA DE ${money(amount)}.';
+        if (cardMode == 'recurring' || cardMode == 'recurring_yearly') {
+          return '${money(amount)} TODO ${cardMode == 'recurring_yearly' ? 'ANO' : 'MÊS'}, ATÉ ENCERRAR.';
+        }
+        if (cardMode == 'yearly' && count >= 1 && count <= 120 && amount > 0) {
+          return '$count COBRANÇAS ANUAIS DE ${money(amount)}. TOTAL: ${money(amount * count)}.';
+        }
         if (repeatMode == 'single') return 'Uma conta de ${money(amount)}.';
         if (count < 1 || count > 120 || amount <= 0) return null;
         if (repeatsEachTitle(repeatMode)) {
@@ -365,6 +429,8 @@ class _EntryDialogState extends State<EntryDialog> {
           );
           final cadence = repeatMode == 'monthly_repeat'
               ? 'todo mês'
+              : repeatMode == 'yearly_repeat'
+              ? 'todo ano'
               : repeatMode == 'weekly'
               ? 'a cada 7 dias'
               : 'a cada ${interval ?? 0} dias';

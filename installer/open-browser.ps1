@@ -39,6 +39,8 @@ try {
             Stop-Process -Force -ErrorAction SilentlyContinue
 
         $env:FINANCE_DB = Join-Path $dataRoot 'financeiro.db'
+        $env:MONALISA_WEB_ORIGIN = Read-Setting 'trusted-web-origin.txt'
+        $env:MONALISA_REQUIRE_DAILY_LOGIN = Read-Setting 'daily-login.txt' '0'
         $networkRole = Read-Setting 'network-role.txt' 'standalone'
         $networkKey = Read-Setting 'network-key.txt'
         $dataServer = Read-Setting 'network-server.txt'

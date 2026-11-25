@@ -121,6 +121,7 @@ sealed partial class Ledger
             interestRate,interestMode,interestValue,penaltyRate,penaltyMode,penaltyValue,discountRate,discountMode,discountValue,documentNumber,issueDate)
             VALUES(@p0,'payable',@p1,@p2,@p3,'CARTÃO DE CRÉDITO',@p4,1,1,@p5,@p6,@p7,@p8,@p9,@p10,@p11,@p12,@p13,@p14,@p15)
             """, company, $"FATURA {cardLabel} - {invoiceLabel}", amount, invoice["dueDate"], $"FATURA FECHADA AUTOMATICAMENTE DO CARTÃO {cardLabel}", plan["interestRate"], plan["interestMode"], plan["interestValue"], plan["penaltyRate"], plan["penaltyMode"], plan["penaltyValue"], plan["discountRate"], plan["discountMode"], plan["discountValue"], $"CARTAO-{invoice["cardId"]}-{reference}", invoice["closingDate"]);
+        Run(c, "UPDATE titles SET plannedAccountId=(SELECT accountId FROM credit_cards WHERE id=@p0) WHERE id=last_insert_rowid()", invoice["cardId"]);
         return Number(Query(c, "SELECT last_insert_rowid() AS id")[0], "id");
     }
 
@@ -232,7 +233,7 @@ sealed partial class Ledger
 
     static int EnsureRecurringCharges(SqliteConnection c, int company, long? onlyId = null)
     {
-        var rows = Query(c, "SELECT r.*,cc.name,cc.lastFour,cc.startDate,cc.closingDay,cc.dueDay FROM credit_card_recurring_charges r JOIN credit_cards cc ON cc.id=r.cardId WHERE r.companyId=@p0 AND r.active=1 AND cc.active=1" + (onlyId.HasValue ? " AND r.id=@p1" : ""), onlyId.HasValue ? new object?[] { company, onlyId.Value } : new object?[] { company });
+        var rows = Query(c, "SELECT r.*,cc.name,cc.lastFour,cc.startDate AS cardStartDate,cc.closingDay,cc.dueDay FROM credit_card_recurring_charges r JOIN credit_cards cc ON cc.id=r.cardId WHERE r.companyId=@p0 AND r.active=1 AND cc.active=1" + (onlyId.HasValue ? " AND r.id=@p1" : ""), onlyId.HasValue ? new object?[] { company, onlyId.Value } : new object?[] { company });
         var today = CreditCardToday();
         var created = 0;
         foreach (var recurrence in rows)
@@ -243,7 +244,7 @@ sealed partial class Ledger
             var lastReference = DateOnly.ParseExact(references.Next + "-01", "yyyy-MM-dd", CultureInfo.InvariantCulture);
             for (var offset = 0; offset < 240; offset++)
             {
-                var occurrenceDate = start.AddMonths(offset);
+                var occurrenceDate = start.AddMonths(offset * Convert.ToInt32(recurrence["intervalMonths"]));
                 var dates = CardInvoiceDates(occurrenceDate, Convert.ToInt32(recurrence["closingDay"]), Convert.ToInt32(recurrence["dueDay"]), 0);
                 var referenceDate = DateOnly.ParseExact(dates.Reference + "-01", "yyyy-MM-dd", CultureInfo.InvariantCulture);
                 if (referenceDate > lastReference) break;
@@ -261,23 +262,23 @@ sealed partial class Ledger
     {
         Company(c, company); Existing(c, "credit_cards", cardId, company); Money(x.Amount, true);
         CloseCreditCardInvoices(c, company, CreditCardToday());
-        var mode = (x.Mode ?? "single").Trim().ToLowerInvariant(); if (mode is not ("single" or "installments" or "recurring")) throw new ArgumentException("Escolha compra única, parcelada ou recorrente.");
+        var mode = (x.Mode ?? "single").Trim().ToLowerInvariant(); if (mode is not ("single" or "installments" or "yearly" or "recurring" or "recurring_yearly")) throw new ArgumentException("Escolha compra única, parcelada, repetição anual ou recorrência.");
         var purchaseDate = Date(x.PurchaseDate); var card = Query(c, "SELECT * FROM credit_cards WHERE id=@p0 AND companyId=@p1 AND active=1", cardId, company).SingleOrDefault() ?? throw new ArgumentException("Cartão não encontrado.");
         if (purchaseDate < Date((string)card["startDate"]!)) throw new ArgumentException("A compra não pode ser anterior à data de criação do cartão.");
         var description = Required(x.Description, "Descrição da compra"); var category = string.IsNullOrWhiteSpace(x.Category) ? "CARTÃO DE CRÉDITO" : Required(x.Category, "Plano de contas"); var notes = RequiredOrEmpty(x.Notes);
         if (Query(c, "SELECT id FROM plans WHERE companyId=@p0 AND kind='payable' AND upper(name)=upper(@p1)", company, category).Count == 0) Run(c, "INSERT INTO plans(companyId,name,kind) VALUES(@p0,@p1,'payable')", company, category);
-        if (mode == "recurring")
+        if (mode is "recurring" or "recurring_yearly")
         {
             var today = CreditCardToday(); var firstCurrentMonth = new DateOnly(today.Year, today.Month, 1); if (purchaseDate < firstCurrentMonth) throw new ArgumentException("A recorrência deve começar no mês atual ou em um mês futuro.");
-            Run(c, "INSERT INTO credit_card_recurring_charges(companyId,cardId,description,amount,startDate,category,notes) VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6)", company, cardId, description, x.Amount, purchaseDate.ToString("yyyy-MM-dd"), category, notes);
+            Run(c, "INSERT INTO credit_card_recurring_charges(companyId,cardId,description,amount,startDate,category,notes,intervalMonths) VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7)", company, cardId, description, x.Amount, purchaseDate.ToString("yyyy-MM-dd"), category, notes, mode == "recurring_yearly" ? 12 : 1);
             var recurrenceId = Number(Query(c, "SELECT last_insert_rowid() AS id")[0], "id"); var generated = EnsureRecurringCharges(c, company, recurrenceId);
             Audit(c, company, "Recorrência de cartão criada", new { cardId, recurrenceId, input = x, generated }); return new { ok = true, recurrenceId, generated };
         }
-        var count = mode == "single" ? 1 : x.Installments; if (count is < 1 or > 120 || x.Amount < count) throw new ArgumentException("Informe entre 1 e 120 parcelas, com ao menos um centavo por parcela.");
+        var count = mode == "single" ? 1 : x.Installments; if (count is < 1 or > 120 || (mode == "installments" && x.Amount < count)) throw new ArgumentException("Informe entre 1 e 120 parcelas, com ao menos um centavo por parcela.");
         var group = Guid.NewGuid().ToString("N"); var generatedItems = new List<object>();
         for (var index = 0; index < count; index++)
         {
-            var amount = x.Amount / count + (index < x.Amount % count ? 1 : 0); var item = AddCreditCardItem(c, company, cardId, card, purchaseDate, index, group, description, category, notes, amount, index + 1, count);
+            var amount = mode == "yearly" ? x.Amount : x.Amount / count + (index < x.Amount % count ? 1 : 0); var item = AddCreditCardItem(c, company, cardId, card, mode == "yearly" ? purchaseDate.AddYears(index) : purchaseDate, mode == "yearly" ? 0 : index, group, description, category, notes, amount, index + 1, count);
             generatedItems.Add(new { invoiceId = item.InvoiceId, titleId = item.TitleId, referenceMonth = item.Reference, due = item.Due, amount = item.Amount });
         }
         Audit(c, company, "Compra no cartão de crédito", new { cardId, purchaseGroup = group, input = x, generated = generatedItems }); return new { ok = true, purchaseGroup = group, installments = generatedItems };

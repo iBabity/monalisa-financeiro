@@ -101,7 +101,10 @@ sealed partial class Ledger
         Run(c, "CREATE INDEX IF NOT EXISTS ix_titles_installment_group ON titles(companyId,installmentGroup)");
         if (Query(c, "SELECT id FROM companies").Count == 0)
         {
-            Run(c, "INSERT INTO companies(name,cnpj) VALUES('EMPRESA AGUARDANDO ATIVAÇÃO','LICENCA-PENDENTE')");
+            if (Environment.GetEnvironmentVariable("MONALISA_INDEPENDENT") == "1")
+                Run(c, "INSERT INTO companies(name,cnpj) VALUES('MINHA EMPRESA','CADASTRO-PENDENTE')");
+            else
+                Run(c, "INSERT INTO companies(name,cnpj) VALUES('EMPRESA AGUARDANDO ATIVAÇÃO','LICENCA-PENDENTE')");
             Run(c, "INSERT INTO accounts(companyId,name,opening) VALUES(1,'CAIXA',0)");
         }
         var currentVersion = Convert.ToInt32(Query(c, "PRAGMA user_version")[0]["user_version"]);
@@ -341,6 +344,56 @@ sealed partial class Ledger
             if (Query(c, "SELECT id FROM companies LIMIT 1").Count > 0) Backup();
             Run(c, "ALTER TABLE ofx_imports ADD COLUMN bankBalance INTEGER; ALTER TABLE ofx_imports ADD COLUMN balanceDate TEXT NOT NULL DEFAULT ''; PRAGMA user_version=20");
         }
+        currentVersion = Convert.ToInt32(Query(c, "PRAGMA user_version")[0]["user_version"]);
+        if (currentVersion < 21)
+        {
+            if (Query(c, "SELECT id FROM companies LIMIT 1").Count > 0) Backup();
+            using var migration = c.BeginTransaction();
+            Run(c, "ALTER TABLE ofx_transactions ADD COLUMN retainedMovementId INTEGER REFERENCES movements(id); PRAGMA user_version=21");
+            migration.Commit();
+        }
+        currentVersion = Convert.ToInt32(Query(c, "PRAGMA user_version")[0]["user_version"]);
+        if (currentVersion < 22)
+        {
+            if (Query(c, "SELECT id FROM companies LIMIT 1").Count > 0) Backup();
+            using var migration = c.BeginTransaction();
+            Run(c, """
+                ALTER TABLE ofx_transactions ADD COLUMN movementId INTEGER REFERENCES movements(id);
+                CREATE TABLE ofx_allocations(transactionId INTEGER NOT NULL REFERENCES ofx_transactions(id),settlementId INTEGER NOT NULL REFERENCES settlements(id),cash INTEGER NOT NULL CHECK(cash>0),retained INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(transactionId,settlementId));
+                CREATE INDEX ix_ofx_allocations_settlement ON ofx_allocations(settlementId);
+                INSERT INTO ofx_allocations(transactionId,settlementId,cash)
+                SELECT o.id,s.id,s.principal+s.interest+s.penalty+s.additional-s.discount
+                FROM ofx_transactions o JOIN settlements s ON s.id=o.settlementId
+                WHERE s.reversed=0 AND s.principal+s.interest+s.penalty+s.additional-s.discount>0;
+                """);
+            RestoreOfxAllocations(c);
+            Run(c, "PRAGMA user_version=22");
+            migration.Commit();
+        }
+        if (!Query(c, "PRAGMA table_info(titles)").Any(r => (string)r["name"]! == "plannedAccountId"))
+        {
+            Backup();
+            using var migration = c.BeginTransaction();
+            Run(c, "ALTER TABLE titles ADD COLUMN plannedAccountId INTEGER REFERENCES accounts(id)");
+            Run(c, "UPDATE titles SET plannedAccountId=(SELECT MIN(s.accountId) FROM settlements s WHERE s.titleId=titles.id AND s.reversed=0) WHERE (SELECT COUNT(DISTINCT s.accountId) FROM settlements s WHERE s.titleId=titles.id AND s.reversed=0)=1");
+            Run(c, "UPDATE titles SET plannedAccountId=(SELECT cc.accountId FROM credit_card_invoices i JOIN credit_cards cc ON cc.id=i.cardId WHERE i.titleId=titles.id) WHERE plannedAccountId IS NULL AND EXISTS(SELECT 1 FROM credit_card_invoices i JOIN credit_cards cc ON cc.id=i.cardId WHERE i.titleId=titles.id AND cc.accountId IS NOT NULL)");
+            Run(c, "CREATE INDEX ix_titles_planned_account ON titles(companyId,plannedAccountId); PRAGMA user_version=23");
+            migration.Commit();
+        }
+        if (!Query(c, "PRAGMA table_info(titles)").Any(r => (string)r["name"]! == "installmentIntervalMonths"))
+        {
+            Backup();
+            using var migration = c.BeginTransaction();
+            Run(c, "ALTER TABLE titles ADD COLUMN installmentIntervalMonths INTEGER NOT NULL DEFAULT 1; PRAGMA user_version=24");
+            migration.Commit();
+        }
+        if (!Query(c, "PRAGMA table_info(credit_card_recurring_charges)").Any(r => (string)r["name"]! == "intervalMonths"))
+        {
+            Backup();
+            using var migration = c.BeginTransaction();
+            Run(c, "ALTER TABLE credit_card_recurring_charges ADD COLUMN intervalMonths INTEGER NOT NULL DEFAULT 1; PRAGMA user_version=25");
+            migration.Commit();
+        }
         foreach (var company in Query(c, "SELECT id FROM companies")) { var companyId = Convert.ToInt32(company["id"]); SeedPlans(c, companyId); SeedAuxiliaries(c, companyId); }
     }
     SqliteConnection Open() { var c = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, ForeignKeys = true }.ToString()); c.Open(); return c; }
@@ -382,6 +435,7 @@ sealed partial class Ledger
     }
     object Write(Func<SqliteConnection, object> operation) { lock (gate) { using var c = Open(); using var tx = c.BeginTransaction(); var result = operation(c); tx.Commit(); return result; } }
     public bool HasUsers() { lock (gate) { using var c = Open(); return Query(c, "SELECT id FROM users LIMIT 1").Count > 0; } }
+    public bool HasInteractiveUsers() { lock (gate) { using var c = Open(); return Query(c, "SELECT id FROM users WHERE username<>'LOCAL' LIMIT 1").Count > 0; } }
     public AuthIdentity LocalAdministrator() { lock (gate) { using var c = Open(); var rows = Query(c, "SELECT * FROM users WHERE username='LOCAL' LIMIT 1"); if (rows.Count == 0) { var pin = HashPin(Convert.ToHexString(RandomNumberGenerator.GetBytes(16))); Run(c, "INSERT INTO users(name,username,pinSalt,pinHash,globalAdmin) VALUES('ACESSO LOCAL','LOCAL',@p0,@p1,1)", pin.Salt, pin.Hash); rows = Query(c, "SELECT * FROM users WHERE id=last_insert_rowid()"); } else if (Number(rows[0], "active") == 0 || Number(rows[0], "globalAdmin") == 0) { Run(c, "UPDATE users SET active=1,globalAdmin=1,failedAttempts=0,lockedUntil='' WHERE id=@p0", rows[0]["id"]); rows = Query(c, "SELECT * FROM users WHERE id=@p0", rows[0]["id"]); } return Identity(rows[0]); } }
     public void ApplyLicensedCompany(LicenseSnapshot license)
     {
@@ -411,7 +465,7 @@ sealed partial class Ledger
     static (string Salt, string Hash) HashPin(string pin) { var salt = RandomNumberGenerator.GetBytes(16); var hash = Rfc2898DeriveBytes.Pbkdf2(pin, salt, 120000, HashAlgorithmName.SHA256, 32); return (Convert.ToBase64String(salt), Convert.ToBase64String(hash)); }
     static bool CheckPin(string pin, string salt, string expected) { try { var hash = Rfc2898DeriveBytes.Pbkdf2(pin, Convert.FromBase64String(salt), 120000, HashAlgorithmName.SHA256, 32); return CryptographicOperations.FixedTimeEquals(hash, Convert.FromBase64String(expected)); } catch { return false; } }
     static AuthIdentity Identity(Dictionary<string, object?> row) => new(Convert.ToInt32(row["id"]), (string)row["name"]!, (string)row["username"]!, Number(row, "globalAdmin") == 1);
-    public AuthIdentity SetupAdministrator(BootstrapInput x) { lock (gate) { using var c = Open(); using var tx = c.BeginTransaction(); if (Query(c, "SELECT id FROM users LIMIT 1").Count > 0) throw new ArgumentException("O administrador geral já foi configurado."); ValidatePin(x.Pin); var pin = HashPin(x.Pin); Run(c, "INSERT INTO users(name,username,pinSalt,pinHash,globalAdmin) VALUES(@p0,@p1,@p2,@p3,1)", Required(x.Name, "Nome"), Username(x.Username), pin.Salt, pin.Hash); var id = Convert.ToInt32(Number(Query(c, "SELECT last_insert_rowid() AS id")[0], "id")); Run(c, "INSERT INTO access_audit(actorUserId,action,detail) VALUES(@p0,'CRIAÇÃO DO ADMINISTRADOR GERAL',@p1)", id, JsonSerializer.Serialize(new { usuario = Username(x.Username) })); tx.Commit(); return new(id, Required(x.Name, "Nome"), Username(x.Username), true); } }
+    public AuthIdentity SetupAdministrator(BootstrapInput x, bool allowLocalOnly = false) { lock (gate) { using var c = Open(); using var tx = c.BeginTransaction(); if (Query(c, allowLocalOnly ? "SELECT id FROM users WHERE username<>'LOCAL' LIMIT 1" : "SELECT id FROM users LIMIT 1").Count > 0) throw new ArgumentException("O administrador geral já foi configurado."); if (allowLocalOnly && Username(x.Username) == "LOCAL") throw new ArgumentException("Escolha um usuário pessoal diferente de LOCAL."); ValidatePin(x.Pin); var pin = HashPin(x.Pin); Run(c, "INSERT INTO users(name,username,pinSalt,pinHash,globalAdmin) VALUES(@p0,@p1,@p2,@p3,1)", Required(x.Name, "Nome"), Username(x.Username), pin.Salt, pin.Hash); var id = Convert.ToInt32(Number(Query(c, "SELECT last_insert_rowid() AS id")[0], "id")); Run(c, "INSERT INTO access_audit(actorUserId,action,detail) VALUES(@p0,'CRIAÇÃO DO ADMINISTRADOR GERAL',@p1)", id, JsonSerializer.Serialize(new { usuario = Username(x.Username) })); tx.Commit(); return new(id, Required(x.Name, "Nome"), Username(x.Username), true); } }
     public AuthIdentity Authenticate(LoginInput x) { lock (gate) { using var c = Open(); var username = Username(x.Username); var rows = Query(c, "SELECT * FROM users WHERE username=@p0", username); if (rows.Count == 0) throw new ArgumentException("Usuário ou PIN inválido."); var row = rows[0]; if (Number(row, "active") == 0) throw new ArgumentException("Este acesso está bloqueado."); if (DateTime.TryParse((string)row["lockedUntil"]!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var locked) && locked > DateTime.UtcNow) throw new ArgumentException("Acesso temporariamente bloqueado. Aguarde alguns minutos."); if (!CheckPin(x.Pin, (string)row["pinSalt"]!, (string)row["pinHash"]!)) { var attempts = Convert.ToInt32(Number(row, "failedAttempts")) + 1; var until = attempts >= 5 ? DateTime.UtcNow.AddMinutes(5).ToString("O") : ""; Run(c, "UPDATE users SET failedAttempts=@p0,lockedUntil=@p1 WHERE id=@p2", attempts >= 5 ? 0 : attempts, until, row["id"]); throw new ArgumentException(attempts >= 5 ? "Muitas tentativas. O acesso foi bloqueado por cinco minutos." : "Usuário ou PIN inválido."); } Run(c, "UPDATE users SET failedAttempts=0,lockedUntil='' WHERE id=@p0", row["id"]); Run(c, "INSERT INTO access_audit(actorUserId,action,detail) VALUES(@p0,'LOGIN',@p1)", row["id"], JsonSerializer.Serialize(new { usuario = username })); return Identity(row); } }
     public AuthIdentity? SessionUser(int id) { lock (gate) { using var c = Open(); var rows = Query(c, "SELECT * FROM users WHERE id=@p0 AND active=1", id); return rows.Count == 0 ? null : Identity(rows[0]); } }
     public bool CanAccessCompany(int userId, int companyId) { lock (gate) { using var c = Open(); return Query(c, "SELECT id FROM users WHERE id=@p0 AND active=1 AND globalAdmin=1", userId).Count > 0 || Query(c, "SELECT userId FROM user_companies WHERE userId=@p0 AND companyId=@p1 AND active=1", userId, companyId).Count > 0; } }
@@ -450,7 +504,7 @@ sealed partial class Ledger
     static string AccountType(string? value) { var type = (value ?? "cash").ToLowerInvariant(); if (type is not ("cash" or "bank" or "wallet")) throw new ArgumentException("Tipo de conta inválido."); return type; }
     public object Account(int company, AccountInput x) => Write(c => { Company(c, company); if (x.Opening < -999999999999 || x.Opening > 999999999999) throw new ArgumentException("Saldo fora do limite."); Run(c, "INSERT INTO accounts(companyId,name,opening,type) VALUES(@p0,@p1,@p2,@p3)", company, Required(x.Name, "Nome"), x.Opening, AccountType(x.Type)); Audit(c, company, "Cadastro de conta", x); return new { ok = true }; });
     public object EditAccount(int company, int id, AccountInput x) => Write(c => { Existing(c, "accounts", id, company); if (x.Opening < -999999999999 || x.Opening > 999999999999) throw new ArgumentException("Saldo fora do limite."); Run(c, "UPDATE accounts SET name=@p0,opening=@p1,type=@p2 WHERE id=@p3", Required(x.Name, "Nome"), x.Opening, AccountType(x.Type), id); Audit(c, company, "Edição de conta", new { id, input = x }); return new { ok = true }; });
-    public object DeleteAccount(int company, int id) => Write(c => { Existing(c, "accounts", id, company); var linked = Query(c, "SELECT description,date FROM movements WHERE accountId=@p0 ORDER BY date,id LIMIT 5", id); if (linked.Count > 0) throw new ArgumentException("Não foi possível excluir. Esta conta está vinculada às movimentações: " + LinkedMovements(linked) + "."); if (Query(c, "SELECT id FROM accounts WHERE companyId=@p0", company).Count <= 1) throw new ArgumentException("Mantenha ao menos uma conta financeira para registrar as baixas."); var name = (string)Query(c, "SELECT name FROM accounts WHERE id=@p0", id)[0]["name"]!; Run(c, "DELETE FROM accounts WHERE id=@p0", id); Audit(c, company, "Exclusão de conta", new { id, name }); return new { ok = true }; });
+    public object DeleteAccount(int company, int id) => Write(c => { Existing(c, "accounts", id, company); var planned = Query(c, "SELECT description,due FROM titles WHERE plannedAccountId=@p0 AND deleted=0 ORDER BY due LIMIT 5", id); if (planned.Count > 0) throw new ArgumentException("Esta conta está prevista nos lançamentos: " + LinkedTitles(planned)); var linked = Query(c, "SELECT description,date FROM movements WHERE accountId=@p0 ORDER BY date,id LIMIT 5", id); if (linked.Count > 0) throw new ArgumentException("Não foi possível excluir. Esta conta está vinculada às movimentações: " + LinkedMovements(linked) + "."); if (Query(c, "SELECT id FROM accounts WHERE companyId=@p0", company).Count <= 1) throw new ArgumentException("Mantenha ao menos uma conta financeira para registrar as baixas."); var name = (string)Query(c, "SELECT name FROM accounts WHERE id=@p0", id)[0]["name"]!; Run(c, "DELETE FROM accounts WHERE id=@p0", id); Audit(c, company, "Exclusão de conta", new { id, name }); return new { ok = true }; });
     static (string Kind, string InterestMode, string PenaltyMode, string DiscountMode) ValidatePlan(PlanInput x) { var kind = PlanKind(x.Kind); var interestMode = AdjustmentMode(x.InterestMode); var penaltyMode = AdjustmentMode(x.PenaltyMode); var discountMode = AdjustmentMode(x.DiscountMode); ValidateAdjustment(interestMode, x.InterestRate, x.InterestValue, "Juros"); ValidateAdjustment(penaltyMode, x.PenaltyRate, x.PenaltyValue, "Multa"); ValidateAdjustment(discountMode, x.DiscountRate, x.DiscountValue, kind == "receivable" ? "Taxa ou desconto" : "Desconto"); return (kind, interestMode, penaltyMode, discountMode); }
     public object Plan(int company, PlanInput x) => Write(c => { Company(c, company); var rule = ValidatePlan(x); Run(c, "INSERT INTO plans(companyId,name,kind,interestRate,interestMode,interestValue,penaltyRate,penaltyMode,penaltyValue,discountRate,discountMode,discountValue) VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7,@p8,@p9,@p10,@p11)", company, Required(x.Name, "Plano de contas"), rule.Kind, x.InterestRate, rule.InterestMode, x.InterestValue, x.PenaltyRate, rule.PenaltyMode, x.PenaltyValue, x.DiscountRate, rule.DiscountMode, x.DiscountValue); Audit(c, company, "Cadastro de plano de contas", x); return new { ok = true }; });
     public object EditPlan(int company, int id, PlanInput x) => Write(c => { Existing(c, "plans", id, company); var rule = ValidatePlan(x); var name = Required(x.Name, "Plano de contas"); var old = Query(c, "SELECT name,kind FROM plans WHERE id=@p0", id)[0]; var oldName = (string)old["name"]!; var oldKind = (string)old["kind"]!; Run(c, "UPDATE plans SET name=@p0,kind=@p1,interestRate=@p2,interestMode=@p3,interestValue=@p4,penaltyRate=@p5,penaltyMode=@p6,penaltyValue=@p7,discountRate=@p8,discountMode=@p9,discountValue=@p10 WHERE id=@p11", name, rule.Kind, x.InterestRate, rule.InterestMode, x.InterestValue, x.PenaltyRate, rule.PenaltyMode, x.PenaltyValue, x.DiscountRate, rule.DiscountMode, x.DiscountValue, id); Run(c, "UPDATE titles SET category=@p0,interestRate=@p1,interestMode=@p2,interestValue=@p3,penaltyRate=@p4,penaltyMode=@p5,penaltyValue=@p6,discountRate=@p7,discountMode=@p8,discountValue=@p9 WHERE companyId=@p10 AND kind=@p11 AND category=@p12 AND deleted=0 AND cancelled=0", name, x.InterestRate, rule.InterestMode, x.InterestValue, x.PenaltyRate, rule.PenaltyMode, x.PenaltyValue, x.DiscountRate, rule.DiscountMode, x.DiscountValue, company, oldKind, oldName); Audit(c, company, "Edição de plano de contas", new { id, oldName, oldKind, input = x }); return new { ok = true }; });
@@ -463,9 +517,9 @@ sealed partial class Ledger
     public object EditCostCenter(int company, int id, NamedInput x) => Write(c => { Existing(c, "cost_centers", id, company); var old = (string)Query(c, "SELECT name FROM cost_centers WHERE id=@p0", id)[0]["name"]!; var name = Required(x.Name, "Centro de custo"); Run(c, "UPDATE cost_centers SET name=@p0 WHERE id=@p1", name, id); Run(c, "UPDATE titles SET costCenter=@p0 WHERE companyId=@p1 AND costCenter=@p2", name, company, old); Audit(c, company, "Edição de centro de custo", new { id, old, name }); return new { ok = true }; });
     public object DeleteCostCenter(int company, int id) => Write(c => { Existing(c, "cost_centers", id, company); var name = (string)Query(c, "SELECT name FROM cost_centers WHERE id=@p0", id)[0]["name"]!; var linked = Query(c, "SELECT description,due FROM titles WHERE companyId=@p0 AND costCenter=@p1 AND deleted=0 LIMIT 5", company, name); if (linked.Count > 0) throw new ArgumentException("Este centro de custo está vinculado aos lançamentos: " + LinkedTitles(linked) + "."); Run(c, "DELETE FROM cost_centers WHERE id=@p0", id); Audit(c, company, "Exclusão de centro de custo", new { id, name }); return new { ok = true }; });
     const string TitlesSql = """
-        SELECT t.*,p.name AS partyName,pm.name AS paymentMethodName,COALESCE((SELECT SUM(s.principal) FROM settlements s WHERE s.titleId=t.id AND s.reversed=0),0) AS settled,
+        SELECT t.*,p.name AS partyName,pm.name AS paymentMethodName,a.name AS plannedAccountName,COALESCE((SELECT SUM(s.principal) FROM settlements s WHERE s.titleId=t.id AND s.reversed=0),0) AS settled,
         t.amount-COALESCE((SELECT SUM(s.principal) FROM settlements s WHERE s.titleId=t.id AND s.reversed=0),0) AS remaining
-        FROM titles t LEFT JOIN parties p ON p.id=t.partyId LEFT JOIN payment_methods pm ON pm.id=t.paymentMethodId WHERE t.companyId=@p0 AND t.deleted=0 ORDER BY t.due,t.id
+        FROM titles t LEFT JOIN parties p ON p.id=t.partyId LEFT JOIN payment_methods pm ON pm.id=t.paymentMethodId LEFT JOIN accounts a ON a.id=t.plannedAccountId WHERE t.companyId=@p0 AND t.deleted=0 ORDER BY t.due,t.id
         """;
     public object State(int company, AuthIdentity? actor = null)
     {
@@ -522,18 +576,21 @@ sealed partial class Ledger
         if (plan is null) { Run(c, "INSERT INTO plans(companyId,name,kind) VALUES(@p0,@p1,@p2)", company, planName, x.Kind); plan = Query(c, "SELECT * FROM plans WHERE id=last_insert_rowid()")[0]; }
         if (x.Installments < 1 || x.Installments > 120 || x.Amount < x.Installments) throw new ArgumentException("Informe entre 1 e 120 parcelas, com ao menos um centavo por parcela.");
         if (x.InstallmentIntervalDays < 0 || x.InstallmentIntervalDays > 365) throw new ArgumentException("O intervalo deve ficar entre 1 e 365 dias, ou zero para mensal.");
+        if (x.InstallmentIntervalMonths is not (1 or 12) || (x.InstallmentIntervalDays > 0 && x.InstallmentIntervalMonths != 1)) throw new ArgumentException("Escolha periodicidade mensal ou anual, sem combinar com intervalo em dias.");
         var custom = x.InstallmentAmounts is not null || x.InstallmentDues is not null;
         if (custom && (x.InstallmentAmounts is null || x.InstallmentDues is null || x.InstallmentAmounts.Length != x.Installments || x.InstallmentDues.Length != x.Installments)) throw new ArgumentException("Complete o valor e o vencimento de todas as parcelas.");
         if (custom && (x.InstallmentAmounts!.Any(v => v <= 0) || x.InstallmentAmounts!.Sum() != x.Amount)) throw new ArgumentException("A soma das parcelas deve ser igual ao valor total.");
         var customDues = custom ? x.InstallmentDues!.Select(Date).ToArray() : Array.Empty<DateOnly>();
         if (x.PartyId.HasValue) Existing(c, "parties", x.PartyId.Value, company);
+        if (x.PlannedAccountId.HasValue) Existing(c, "accounts", x.PlannedAccountId.Value, company);
         if (x.PaymentMethodId.HasValue) { Existing(c, "payment_methods", x.PaymentMethodId.Value, company); var method = Query(c, "SELECT kind FROM payment_methods WHERE id=@p0", x.PaymentMethodId.Value)[0]["kind"] as string; if (method != "both" && method != x.Kind) throw new ArgumentException("A forma selecionada não atende este tipo de lançamento."); }
         var costCenter = RequiredOrEmpty(x.CostCenter); var existingCostCenter = costCenter.Length == 0 || Query(c, "SELECT id FROM cost_centers WHERE companyId=@p0 AND upper(name)=upper(@p1)", company, costCenter).Count > 0; if (!existingCostCenter && actor is not null && IsFinancialUser(actor, company)) throw new ArgumentException("Selecione um centro de custo já cadastrado pelo administrador."); if (!existingCostCenter) Run(c, "INSERT INTO cost_centers(companyId,name) VALUES(@p0,@p1)", company, costCenter);
         var group = x.Installments > 1 ? Guid.NewGuid().ToString("N") : null;
-        for (var i = 0; i < x.Installments; i++) Run(c, "INSERT INTO titles(companyId,kind,description,amount,due,partyId,category,notes,installmentGroup,installmentNumber,installmentCount,interestRate,interestMode,interestValue,penaltyRate,penaltyMode,penaltyValue,discountRate,discountMode,discountValue,documentNumber,issueDate,branch,costCenter,paymentMethodId) VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7,@p8,@p9,@p10,@p11,@p12,@p13,@p14,@p15,@p16,@p17,@p18,@p19,@p20,@p21,@p22,@p23,@p24)", company, x.Kind, description + (x.Installments > 1 ? $" ({i + 1}/{x.Installments})" : ""), custom ? x.InstallmentAmounts![i] : x.Amount / x.Installments + (i < x.Amount % x.Installments ? 1 : 0), (custom ? customDues[i] : x.InstallmentIntervalDays == 7 ? due.AddDays(i * 7) : due.AddMonths(i)).ToString("yyyy-MM-dd"), x.PartyId, planName, (x.Notes ?? "").ToUpperInvariant(), group, i + 1, x.Installments, plan["interestRate"], plan["interestMode"], plan["interestValue"], plan["penaltyRate"], plan["penaltyMode"], plan["penaltyValue"], plan["discountRate"], plan["discountMode"], plan["discountValue"], document, issue, RequiredOrEmpty(x.Branch), costCenter, x.PaymentMethodId);
+        for (var i = 0; i < x.Installments; i++) Run(c, "INSERT INTO titles(companyId,kind,description,amount,due,partyId,category,notes,installmentGroup,installmentNumber,installmentCount,interestRate,interestMode,interestValue,penaltyRate,penaltyMode,penaltyValue,discountRate,discountMode,discountValue,documentNumber,issueDate,branch,costCenter,paymentMethodId,plannedAccountId) VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7,@p8,@p9,@p10,@p11,@p12,@p13,@p14,@p15,@p16,@p17,@p18,@p19,@p20,@p21,@p22,@p23,@p24,@p25)", company, x.Kind, description + (x.Installments > 1 ? $" ({i + 1}/{x.Installments})" : ""), custom ? x.InstallmentAmounts![i] : x.Amount / x.Installments + (i < x.Amount % x.Installments ? 1 : 0), (custom ? customDues[i] : x.InstallmentIntervalDays > 0 ? due.AddDays(i * x.InstallmentIntervalDays) : due.AddMonths(i * x.InstallmentIntervalMonths)).ToString("yyyy-MM-dd"), x.PartyId, planName, (x.Notes ?? "").ToUpperInvariant(), group, i + 1, x.Installments, plan["interestRate"], plan["interestMode"], plan["interestValue"], plan["penaltyRate"], plan["penaltyMode"], plan["penaltyValue"], plan["discountRate"], plan["discountMode"], plan["discountValue"], document, issue, RequiredOrEmpty(x.Branch), costCenter, x.PaymentMethodId, x.PlannedAccountId);
+        if (group is not null) Run(c, "UPDATE titles SET installmentIntervalMonths=@p0 WHERE companyId=@p1 AND installmentGroup=@p2", x.InstallmentIntervalMonths, company, group);
         Audit(c, company, "Lançamento", x); return new { ok = true };
     });
-    long SettleCore(SqliteConnection c, int company, int id, SettlementInput x)
+    long SettleCore(SqliteConnection c, int company, int id, SettlementInput x, long? retainedMovementId = null, long[]? retainedSettlementIds = null)
     {
         Existing(c, "titles", id, company); Existing(c, "accounts", x.AccountId, company); var date = Date(x.Date); if (date > DateOnly.FromDateTime(DateTime.Today)) throw new ArgumentException("A baixa não pode ter data futura.");
         Money(x.Principal, true); Money(x.Interest); Money(x.Penalty); Money(x.Discount); Money(x.Additional);
@@ -544,7 +601,29 @@ sealed partial class Ledger
         var cash = checked(x.Principal + x.Interest + x.Penalty + x.Additional - x.Discount);
         Run(c, "INSERT INTO settlements(companyId,titleId,accountId,principal,interest,penalty,discount,date,additional,paymentMethodId) VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7,@p8,@p9)", company, id, x.AccountId, x.Principal, x.Interest, x.Penalty, x.Discount, x.Date, x.Additional, x.PaymentMethodId);
         var sid = Number(Query(c, "SELECT last_insert_rowid() AS id")[0], "id");
-        Run(c, "INSERT INTO movements(companyId,accountId,amount,date,description,settlementId) VALUES(@p0,@p1,@p2,@p3,@p4,@p5)", company, x.AccountId, (string)title["kind"]! == "payable" ? -cash : cash, x.Date, title["description"], sid);
+        var signedCash = (string)title["kind"]! == "payable" ? -cash : cash;
+        if (retainedSettlementIds is { Length: > 0 })
+        {
+            long retainedCash=0;
+            foreach(var oldId in retainedSettlementIds.Distinct())
+            {
+                var old=Query(c,"SELECT * FROM settlements WHERE id=@p0 AND companyId=@p1 AND accountId=@p2 AND reversed=1",oldId,company,x.AccountId).SingleOrDefault()??throw new ArgumentException("Movimento preservado inválido.");
+                var net=Number(Query(c,"SELECT COALESCE(SUM(amount),0) total FROM movements WHERE settlementId=@p0",oldId)[0],"total");
+                if(net!=(signedCash<0?-1:1)*SettlementCash(old))throw new ArgumentException("O movimento preservado não corresponde ao valor da baixa.");
+                retainedCash=checked(retainedCash+Math.Abs(net));
+            }
+            if(retainedCash>cash)throw new ArgumentException("O valor preservado excede a movimentação do banco.");
+            foreach(var oldId in retainedSettlementIds.Distinct())Run(c,"UPDATE movements SET settlementId=@p0 WHERE settlementId=@p1",sid,oldId);
+            var difference=(signedCash<0?-1:1)*(cash-retainedCash);
+            if(difference!=0)Run(c,"INSERT INTO movements(companyId,accountId,amount,date,description,settlementId) VALUES(@p0,@p1,@p2,@p3,@p4,@p5)",company,x.AccountId,difference,x.Date,title["description"],sid);
+        }
+        else if (retainedMovementId.HasValue)
+        {
+            var retained = Query(c, "SELECT m.id FROM movements m JOIN settlements s ON s.id=m.settlementId WHERE m.id=@p0 AND m.companyId=@p1 AND m.accountId=@p2 AND m.amount=@p3 AND m.date=@p4 AND s.reversed=1", retainedMovementId.Value, company, x.AccountId, signedCash, x.Date);
+            if (retained.Count != 1) throw new ArgumentException("O movimento bancário preservado não corresponde a esta baixa.");
+            Run(c, "UPDATE movements SET settlementId=@p0,description=@p1 WHERE id=@p2", sid, title["description"], retainedMovementId.Value);
+        }
+        else Run(c, "INSERT INTO movements(companyId,accountId,amount,date,description,settlementId) VALUES(@p0,@p1,@p2,@p3,@p4,@p5)", company, x.AccountId, signedCash, x.Date, title["description"], sid);
         Audit(c, company, "Baixa", new { titleId = id, settlementId = sid, input = x }); return sid;
     }
     public object Settle(int company, int id, SettlementInput x) => Write(c => new { id = SettleCore(c, company, id, x) });
@@ -558,16 +637,19 @@ sealed partial class Ledger
     public object Duplicate(int company, int id, DuplicateInput x) => Write(c =>
     {
         Existing(c, "titles", id, company); EnsureManualTitle(c, id); var t = Query(c, "SELECT * FROM titles WHERE id=@p0 AND deleted=0", id).SingleOrDefault() ?? throw new ArgumentException("Lançamento não encontrado."); var due = string.IsNullOrWhiteSpace(x.Due) ? (string)t["due"]! : Date(x.Due).ToString("yyyy-MM-dd"); var description = Regex.Replace((string)t["description"]!, @" \(\d+/\d+\)$", "") + " - CÓPIA";
-        Run(c, "INSERT INTO titles(companyId,kind,description,amount,due,partyId,category,notes,installmentNumber,installmentCount,interestRate,interestMode,interestValue,penaltyRate,penaltyMode,penaltyValue,discountRate,discountMode,discountValue,issueDate,branch,costCenter,paymentMethodId) VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7,1,1,@p8,@p9,@p10,@p11,@p12,@p13,@p14,@p15,@p16,@p17,@p18,@p19,@p20)", company, t["kind"], description, t["amount"], due, t["partyId"], t["category"], t["notes"], t["interestRate"], t["interestMode"], t["interestValue"], t["penaltyRate"], t["penaltyMode"], t["penaltyValue"], t["discountRate"], t["discountMode"], t["discountValue"], t["issueDate"], t["branch"], t["costCenter"], t["paymentMethodId"]); var newId = Number(Query(c, "SELECT last_insert_rowid() AS id")[0], "id"); Audit(c, company, "Duplicação", new { sourceId = id, titleId = newId, due }); return new { ok = true, id = newId };
+        Run(c, "INSERT INTO titles(companyId,kind,description,amount,due,partyId,category,notes,installmentNumber,installmentCount,interestRate,interestMode,interestValue,penaltyRate,penaltyMode,penaltyValue,discountRate,discountMode,discountValue,issueDate,branch,costCenter,paymentMethodId) VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7,1,1,@p8,@p9,@p10,@p11,@p12,@p13,@p14,@p15,@p16,@p17,@p18,@p19,@p20)", company, t["kind"], description, t["amount"], due, t["partyId"], t["category"], t["notes"], t["interestRate"], t["interestMode"], t["interestValue"], t["penaltyRate"], t["penaltyMode"], t["penaltyValue"], t["discountRate"], t["discountMode"], t["discountValue"], t["issueDate"], t["branch"], t["costCenter"], t["paymentMethodId"]); var newId = Number(Query(c, "SELECT last_insert_rowid() AS id")[0], "id"); Run(c, "UPDATE titles SET plannedAccountId=@p0 WHERE id=@p1", t["plannedAccountId"], newId); Audit(c, company, "Duplicação", new { sourceId = id, titleId = newId, due }); return new { ok = true, id = newId };
     });
-    public object Reverse(int company, int id, ReasonInput x) => Write(c =>
+    public object Reverse(int company, int id, ReverseInput x) => Write(c =>
     {
         Existing(c, "settlements", id, company); var reason = Required(x.Reason, "Motivo"); var s = Query(c, "SELECT * FROM settlements WHERE id=@p0", id)[0];
         if (Number(s, "reversed") != 0) throw new ArgumentException("Esta baixa já foi estornada.");
         Run(c, "UPDATE settlements SET reversed=1,reason=@p0 WHERE id=@p1", reason, id);
-        Run(c, "UPDATE ofx_transactions SET settlementId=NULL WHERE settlementId=@p0", id);
-        Run(c, "INSERT INTO movements(companyId,accountId,amount,date,description,settlementId) SELECT companyId,accountId,-amount,@p0,'Estorno: '||description,settlementId FROM movements WHERE settlementId=@p1", DateTime.Today.ToString("yyyy-MM-dd"), id);
-        Audit(c, company, "Estorno", new { settlementId = id, reason }); return new { ok = true };
+        UnlinkOfx(c,id,x.AdjustBalance);
+        if (x.AdjustBalance)
+        {
+            Run(c, "INSERT INTO movements(companyId,accountId,amount,date,description,settlementId) SELECT companyId,accountId,-amount,@p0,'Estorno: '||description,settlementId FROM movements WHERE settlementId=@p1", DateTime.Today.ToString("yyyy-MM-dd"), id);
+        }
+        Audit(c, company, "Estorno", new { settlementId = id, reason, adjustBalance = x.AdjustBalance }); return new { ok = true, adjustBalance = x.AdjustBalance };
     });
     public object Cancel(int company, int id, CancelInput x) => Write(c =>
     {
@@ -589,6 +671,7 @@ sealed partial class Ledger
         if (x.Scope != "single" && x.Scope != "all_open") throw new ArgumentException("Escolha editar somente esta parcela ou todas as parcelas sem baixa."); Existing(c, "titles", id, company); EnsureManualTitle(c, id);
         Money(x.Amount, true); var due = Date(x.Due); var description = Required(x.Description, "Descrição");
         if (x.PartyId.HasValue) Existing(c, "parties", x.PartyId.Value, company);
+        if (x.PlannedAccountId.HasValue) Existing(c, "accounts", x.PlannedAccountId.Value, company);
         if (x.PaymentMethodId.HasValue) Existing(c, "payment_methods", x.PaymentMethodId.Value, company);
         var costCenter = RequiredOrEmpty(x.CostCenter); var existingCostCenter = costCenter.Length == 0 || Query(c, "SELECT id FROM cost_centers WHERE companyId=@p0 AND upper(name)=upper(@p1)", company, costCenter).Count > 0; if (!existingCostCenter && actor is not null && IsFinancialUser(actor, company)) throw new ArgumentException("Selecione um centro de custo já cadastrado pelo administrador."); if (!existingCostCenter) Run(c, "INSERT INTO cost_centers(companyId,name) VALUES(@p0,@p1)", company, costCenter);
         var all = Query(c, TitlesSql, company); var selected = all.SingleOrDefault(r => Number(r, "id") == id) ?? throw new ArgumentException("Lançamento não encontrado.");
@@ -603,9 +686,10 @@ sealed partial class Ledger
         foreach (var target in targets)
         {
             var number = Convert.ToInt32(target["installmentNumber"]); var count = Convert.ToInt32(target["installmentCount"]);
-            var label = description + (count > 1 ? $" ({number}/{count})" : ""); var targetDue = due.AddMonths(number - selectedNumber).ToString("yyyy-MM-dd");
+            var label = description + (count > 1 ? $" ({number}/{count})" : ""); var targetDue = due.AddMonths((number - selectedNumber) * Convert.ToInt32(selected["installmentIntervalMonths"])).ToString("yyyy-MM-dd");
             Run(c, "UPDATE titles SET description=@p0,amount=@p1,due=@p2,partyId=@p3,category=@p4,notes=@p5,documentNumber=@p6,issueDate=@p7,branch=@p8,costCenter=@p9,paymentMethodId=@p10,interestRate=@p11,interestMode=@p12,interestValue=@p13,penaltyRate=@p14,penaltyMode=@p15,penaltyValue=@p16,discountRate=@p17,discountMode=@p18,discountValue=@p19 WHERE id=@p20", label, x.Amount, targetDue, x.PartyId, planName, (x.Notes ?? "").ToUpperInvariant(), RequiredOrEmpty(x.DocumentNumber), string.IsNullOrWhiteSpace(x.IssueDate) ? "" : Date(x.IssueDate).ToString("yyyy-MM-dd"), RequiredOrEmpty(x.Branch), costCenter, x.PaymentMethodId, plan["interestRate"], plan["interestMode"], plan["interestValue"], plan["penaltyRate"], plan["penaltyMode"], plan["penaltyValue"], plan["discountRate"], plan["discountMode"], plan["discountValue"], Number(target, "id"));
-            Audit(c, company, "Edição", new { titleId = Number(target, "id"), description = label, amount = x.Amount, due = targetDue, scope = x.Scope });
+            Run(c, "UPDATE titles SET plannedAccountId=@p0 WHERE id=@p1", x.PlannedAccountId, Number(target, "id"));
+            Audit(c, company, "Edição", new { plannedAccountId = x.PlannedAccountId, titleId = Number(target, "id"), description = label, amount = x.Amount, due = targetDue, scope = x.Scope });
         }
         return new { ok = true, editedCount = targets.Count };
     });

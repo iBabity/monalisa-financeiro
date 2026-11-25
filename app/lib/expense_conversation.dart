@@ -7,11 +7,23 @@ const _teal = Color(0xFF073F43);
 
 class ExpenseConversationDialog extends StatefulWidget {
   final bool receivable;
+  final List<RecordData> accounts;
+  final int? initialAccountId;
+  final ValueChanged<int?>? onAccountSelected;
+  final List<RecordData> parties;
+  final ValueChanged<int?>? onPartySelected;
+  final Future<RecordData?> Function()? createParty;
   final Future<void> Function(String description, int amount, String due) save;
   const ExpenseConversationDialog({
     super.key,
     required this.save,
     this.receivable = false,
+    this.accounts = const [],
+    this.initialAccountId,
+    this.onAccountSelected,
+    this.parties = const [],
+    this.onPartySelected,
+    this.createParty,
   });
 
   @override
@@ -28,6 +40,9 @@ class _ExpenseConversationDialogState extends State<ExpenseConversationDialog> {
   String due = '';
   String? error;
   bool busy = false;
+  bool creatingParty = false;
+  int selectedParty = 0;
+  late final partyChoices = List<RecordData>.of(widget.parties);
 
   List<String> get questions => [
     widget.receivable
@@ -89,7 +104,7 @@ class _ExpenseConversationDialogState extends State<ExpenseConversationDialog> {
   }
 
   Future<void> confirm() async {
-    if (busy) return;
+    if (busy || creatingParty) return;
     setState(() {
       busy = true;
       error = null;
@@ -215,6 +230,111 @@ class _ExpenseConversationDialogState extends State<ExpenseConversationDialog> {
                 ),
               ),
               const SizedBox(height: 10),
+
+              if (complete && widget.createParty != null) ...[
+                DropdownButtonFormField<int>(
+                  key: ValueKey('party-$selectedParty'),
+                  initialValue: selectedParty,
+                  isExpanded: true,
+                  decoration: InputDecoration(
+                    labelText: widget.receivable ? 'CLIENTE' : 'FORNECEDOR',
+                  ),
+                  items: [
+                    const DropdownMenuItem(
+                      value: 0,
+                      child: Text('SEM VÍNCULO'),
+                    ),
+                    ...partyChoices.map(
+                      (p) => DropdownMenuItem(
+                        value: (p['id'] as num).toInt(),
+                        child: Text(
+                          '${p['name']}',
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ),
+                  ],
+                  onChanged: busy || creatingParty
+                      ? null
+                      : (v) {
+                          setState(() => selectedParty = v ?? 0);
+                          widget.onPartySelected?.call(
+                            selectedParty == 0 ? null : selectedParty,
+                          );
+                        },
+                ),
+                const SizedBox(height: 8),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: FilledButton.tonalIcon(
+                    icon: const Icon(Icons.person_add_alt_1_outlined),
+                    label: Text(
+                      widget.receivable ? 'NOVO CLIENTE' : 'NOVO FORNECEDOR',
+                    ),
+                    onPressed: busy || creatingParty
+                        ? null
+                        : () async {
+                            setState(() => creatingParty = true);
+                            try {
+                              final party = await widget.createParty!();
+                              if (!mounted || party == null) return;
+                              setState(() {
+                                if (!partyChoices.any(
+                                  (p) => p['id'] == party['id'],
+                                )) {
+                                  partyChoices.add(party);
+                                }
+                                selectedParty = (party['id'] as num).toInt();
+                              });
+                              widget.onPartySelected?.call(selectedParty);
+                            } catch (e) {
+                              if (mounted) {
+                                setState(
+                                  () => error = e.toString().replaceFirst(
+                                    'Exception: ',
+                                    '',
+                                  ),
+                                );
+                              }
+                            } finally {
+                              if (mounted) {
+                                setState(() => creatingParty = false);
+                              }
+                            }
+                          },
+                  ),
+                ),
+                const SizedBox(height: 12),
+              ],
+              if (complete && widget.accounts.isNotEmpty) ...[
+                DropdownButtonFormField<int>(
+                  initialValue: widget.initialAccountId ?? 0,
+                  isExpanded: true,
+                  decoration: const InputDecoration(
+                    labelText: 'CONTA FINANCEIRA PREVISTA',
+                  ),
+                  items: [
+                    const DropdownMenuItem(
+                      value: 0,
+                      child: Text('NÃO DEFINIDA'),
+                    ),
+                    ...widget.accounts.map(
+                      (a) => DropdownMenuItem(
+                        value: (a['id'] as num).toInt(),
+                        child: Text(
+                          '${a['name']}',
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ),
+                  ],
+                  onChanged: busy
+                      ? null
+                      : (v) =>
+                            widget.onAccountSelected?.call(v == 0 ? null : v),
+                ),
+                const SizedBox(height: 12),
+              ],
               if (!complete) ...[
                 TextField(
                   controller: controller,
